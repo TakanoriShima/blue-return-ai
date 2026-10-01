@@ -39,8 +39,10 @@ PROCESSOR_EXTENSIONS = {"invoices": ".xlsx", "credit_card": ".csv", "bank": ".cs
 SALES_REFERENCE_FIELDS = ["template_pattern", "document_total", "document_subtotal", "withholding_base"]
 # 会計用の売上金額（docs/data_model.md §17.7）。原資料の金額とは別の項目
 ACCOUNTING_FIELDS = ["accounting_sales_amount", "accounting_sales_amount_basis"]
+# 既存の列の位置を変えないよう、revenue_date_basis は末尾に追加する
 SALES_COLUMNS = ["source_key", "document_key", *RECORD_COLUMNS, "revenue_date", "revenue_date_status",
-                 *SALES_REFERENCE_FIELDS, *ACCOUNTING_FIELDS]
+                 *SALES_REFERENCE_FIELDS, *ACCOUNTING_FIELDS, "revenue_date_basis"]
+UNCONFIRMED_REVENUE = {"revenue_date": None, "revenue_date_status": "unconfirmed", "revenue_date_basis": None}
 CARD_COLUMNS = [
     "source_key", "document_key", "row_number", "record_status", "duplicate_of_document",
     "format_id", "use_date", "usage_category", "user_category", "merchant", "point_target",
@@ -249,8 +251,8 @@ def sales_rows(result: ProcessResult) -> list[dict]:
             **record_to_row(item["record"]),
             "source_key": item["source_key"],
             "document_key": item["document_key"],
-            "revenue_date": None,  # 売上計上日はプログラムが決めない
-            "revenue_date_status": "unconfirmed",
+            # 売上計上日はプログラムが決めない。人間の判断（revenue_dates.csv）がある場合だけ確定値を出す
+            **item.get("revenue", UNCONFIRMED_REVENUE),
             **item["reference"],
             **item.get("accounting", dict.fromkeys(ACCOUNTING_FIELDS)),
         }
@@ -313,6 +315,25 @@ def _instructor_subtotal(record: dict, reference: dict) -> int | None:
     return net
 
 
+def apply_revenue_date_decisions(result: ProcessResult, decisions: dict[str, dict]) -> None:
+    """人間が判断した売上計上日を、source_key が一致する売上にだけ反映する（推測・補完はしない）。"""
+    used: set[str] = set()
+    for item in result.sales:
+        decision = decisions.get(item["source_key"])
+        if decision is None:
+            item["revenue"] = dict(UNCONFIRMED_REVENUE)
+            continue
+        used.add(item["source_key"])
+        item["record"]["revenue_date"] = decision["revenue_date"]
+        item["revenue"] = {
+            "revenue_date": decision["revenue_date"],
+            "revenue_date_status": "human_confirmed",
+            "revenue_date_basis": decision["revenue_date_basis"],
+        }
+    result.stats["revenue_date_decisions"]["applied"] = len(used)
+    result.stats["revenue_date_decisions"]["unused"] = len(set(decisions) - used)
+
+
 def apply_accounting_amounts(result: ProcessResult, settings: dict | None) -> None:
     """各売上に会計用の売上金額を付ける。決められない売上は警告を付け、要確認にする。"""
     for item in result.sales:
@@ -357,7 +378,8 @@ def unresolved_rows(result: ProcessResult) -> list[dict]:
     for item in result.sales:
         for warning in item["record"]["warnings"]:
             add("sales", item["source_key"], item["document_key"], warning["code"], warning["field"])
-        add("sales", item["source_key"], item["document_key"], "REVENUE_DATE_UNCONFIRMED", "revenue_date")
+        if item.get("revenue", UNCONFIRMED_REVENUE)["revenue_date_status"] != "human_confirmed":
+            add("sales", item["source_key"], item["document_key"], "REVENUE_DATE_UNCONFIRMED", "revenue_date")
     for source_type, transactions in (("card", result.card), ("bank", result.bank)):
         for transaction in transactions:
             if transaction["record_status"] != "active":
@@ -394,6 +416,11 @@ def summarize(result: ProcessResult, unresolved: list[dict]) -> dict:
             "needs_review": sum(i["record"]["review_status"] == "needs_review" for i in result.sales),
             "by_template_pattern": dict(sorted(Counter(
                 _pattern_label(i) for i in result.sales).items())),
+            "revenue_date_confirmed": sum(
+                i.get("revenue", UNCONFIRMED_REVENUE)["revenue_date_status"] == "human_confirmed"
+                for i in result.sales),
+            "revenue_date_decisions_unused": result.stats.get(
+                "revenue_date_decisions", Counter()).get("unused", 0),
         },
         "card": transaction_counts(result.card, "credit_card"),
         "bank": transaction_counts(result.bank, "bank"),

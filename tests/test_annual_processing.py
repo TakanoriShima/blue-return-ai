@@ -167,7 +167,8 @@ def test_manifest_counts(repo):
         "duplicate_files": 0, "skipped_by_decision": 0}
     assert processing["files"]["bank"]["failed"] == 1
     assert processing["sales"] == {"records": 2, "needs_review": 2,
-                                   "by_template_pattern": {"A": 2}}
+                                   "by_template_pattern": {"A": 2},
+                                   "revenue_date_confirmed": 0, "revenue_date_decisions_unused": 0}
     assert processing["card"]["transactions"] == 6
     assert processing["card"]["rows_not_transaction"] == 2
     assert processing["bank"]["transactions"] == 6

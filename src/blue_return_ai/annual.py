@@ -16,6 +16,11 @@
     sha256,status,note
     <ファイルの SHA-256>,manual,<メモ>
   status には manual / cross_check_only / unsupported / unresolved / imported を指定できる。
+
+売上計上日の人間判断（data/decisions/revenue_dates.csv）
+    source_key,revenue_date,revenue_date_basis,note
+    <sales.csv の source_key>,<YYYY-MM-DD>,<service_period_end 等>,<メモ>
+  一致する売上の revenue_date を human_confirmed として反映する（プログラムは計上日を決めない）。
 """
 
 from __future__ import annotations
@@ -24,10 +29,11 @@ import argparse
 import csv
 import hashlib
 import json
+import re
 import sys
 import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from .cli import REPO_ROOT, UnsafeOutputDirError, check_out_dir
@@ -38,6 +44,7 @@ from .annual_processors import (
     SALES_COLUMNS,
     UNRESOLVED_COLUMNS,
     apply_accounting_amounts,
+    apply_revenue_date_decisions,
     process_documents,
     resolve_processors,
     sales_rows,
@@ -137,6 +144,57 @@ def load_document_decisions(decisions_dir: Path | None) -> dict[str, dict]:
     return decisions
 
 
+REVENUE_DATE_BASES = ("service_period_end", "service_completion_date", "contract_based", "other")
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def load_revenue_date_decisions(decisions_dir: Path | None, year: int) -> dict[str, dict]:
+    """data/decisions/revenue_dates.csv（source_key,revenue_date,revenue_date_basis,note）を読む。
+
+    - ファイルが無ければ空（従来どおり、すべて未確定）。
+    - revenue_date が空欄の行は確定扱いにしない（読み飛ばす）。
+    - 日付形式の誤り（YYYY-MM-DD 以外・存在しない日付）、対象年と異なる日付、未知の根拠、
+      同じ source_key の重複は、補正せず AnnualError にする。エラーには行番号だけを出す。
+    """
+    if decisions_dir is None:
+        return {}
+    path = decisions_dir / "revenue_dates.csv"
+    if not path.exists():
+        return {}
+    decisions: dict[str, dict] = {}
+    seen: set[str] = set()
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        required = {"source_key", "revenue_date", "revenue_date_basis", "note"}
+        if reader.fieldnames is None or not required <= set(reader.fieldnames):
+            raise AnnualError("revenue_dates.csv には source_key, revenue_date, revenue_date_basis, note の列が必要です")
+        for line, row in enumerate(reader, start=2):
+            label = f"revenue_dates.csv の {line} 行目"
+            source_key = (row.get("source_key") or "").strip()
+            if not source_key:
+                raise AnnualError(f"{label}: source_key が空です")
+            if source_key in seen:
+                raise AnnualError(f"{label}: 同じ source_key の判断が重複しています")
+            seen.add(source_key)
+            revenue_date = (row.get("revenue_date") or "").strip()
+            if not revenue_date:
+                continue  # 空欄は確定扱いにしない
+            if not _ISO_DATE.match(revenue_date):
+                raise AnnualError(f"{label}: revenue_date は YYYY-MM-DD 形式で指定してください")
+            try:
+                parsed = date.fromisoformat(revenue_date)
+            except ValueError:
+                raise AnnualError(f"{label}: revenue_date が存在しない日付です") from None
+            if parsed.year != year:
+                raise AnnualError(f"{label}: revenue_date が対象年と異なります")
+            basis = (row.get("revenue_date_basis") or "").strip()
+            if basis not in REVENUE_DATE_BASES:
+                raise AnnualError(
+                    f"{label}: revenue_date_basis は {' / '.join(REVENUE_DATE_BASES)} のいずれかです")
+            decisions[source_key] = {"revenue_date": revenue_date, "revenue_date_basis": basis}
+    return decisions
+
+
 def build_inventory(config: AnnualConfig, repo_root: Path,
                     decisions: dict[str, dict] | None = None) -> list[dict]:
     """設定された各フォルダのファイルを一覧化する（ファイルの中身は解析しない）。"""
@@ -187,6 +245,7 @@ def run(year: int, config_path: Path, out_root: Path, repo_root: Path = REPO_ROO
     config = load_config(config_path, repo_root)
     processors = resolve_processors(config)
     decisions = load_document_decisions(config.decisions_dir)
+    revenue_decisions = load_revenue_date_decisions(config.decisions_dir, year)
     run_id = new_run_id(year)
     run_dir = create_run_dir(out_root, run_id)
 
@@ -194,6 +253,7 @@ def run(year: int, config_path: Path, out_root: Path, repo_root: Path = REPO_ROO
     processed = process_documents(inventory, processors, repo_root, year)
     accounting = config.accounting.get(year)
     apply_accounting_amounts(processed, accounting)
+    apply_revenue_date_decisions(processed, revenue_decisions)
     unresolved = unresolved_rows(processed)
     counts = summarize(processed, unresolved)
 
@@ -283,6 +343,8 @@ def format_summary(manifest: dict) -> str:
         lines.append(f"  {category} の資料: " + ", ".join(f"{k}={v}" for k, v in counts.items()))
     sales = processing["sales"]
     lines.append(f"売上: {sales['records']} 件（要確認 {sales['needs_review']} 件）")
+    lines.append(f"  売上計上日（人間の判断で確定）: {sales['revenue_date_confirmed']} 件"
+                 f"、どの売上とも一致しなかった判断: {sales['revenue_date_decisions_unused']} 件")
     lines.append("  帳票パターン別: " + (
         ", ".join(f"{k}={v}" for k, v in sales["by_template_pattern"].items()) or "なし"))
     for label, key in (("カード取引", "card"), ("銀行取引", "bank")):

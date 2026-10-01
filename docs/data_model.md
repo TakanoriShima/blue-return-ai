@@ -845,3 +845,26 @@ template_c とは構造が大きく異なるため、独立したアダプター
 - 講師形式の最終の「合計」は、小計から源泉税額を差し引いた請求・振込予定額であるため、売上金額として使わない。
 - 講師形式で `net_amount` に入っている「小計」は、人間の確認では源泉徴収前の税込報酬額（消費税を内包）である。`net_amount` の項目名・意味の見直しは今回行っていない（§17.1.2 の割り当ては従来どおり）。
 - `sales.csv` に `accounting_sales_amount` と `accounting_sales_amount_basis` を追加する（既存列は変更しない）。人間確認用 Excel では、売上一覧に「会計用売上金額（税込経理）」「会計用売上金額の根拠」、集計に「会計用売上金額：判明分の合計」「値が不明（件）」と会計上の前提を表示する。`manifest.json` には、その年の会計設定を記録する。
+
+### 17.8 売上計上日の人間判断（`data/decisions/revenue_dates.csv`）
+
+売上計上日はプログラムが決めない。人間が判断した日付を判断ファイルに書き、年間処理の再実行時に反映する。
+
+```
+source_key,revenue_date,revenue_date_basis,note
+<sales.csv の source_key>,2026-04-30,service_period_end,<メモ>
+```
+
+| 列 | 内容 |
+| --- | --- |
+| `source_key` | `sales.csv` の `source_key`（必須） |
+| `revenue_date` | `YYYY-MM-DD`。空欄の行は確定扱いにしない |
+| `revenue_date_basis` | 判断の根拠：`service_period_end` / `service_completion_date` / `contract_based` / `other` |
+| `note` | 人間向けのメモ（出力には含めない） |
+
+- 一致する売上は `revenue_date` = 判断の日付、`revenue_date_status` = `human_confirmed`、`revenue_date_basis` = 判断の根拠とし、`REVENUE_DATE_UNCONFIRMED` を出さない。
+- 判断の無い売上は従来どおり `revenue_date` = null、`revenue_date_status` = `unconfirmed`。
+- 日付形式の誤り・存在しない日付・対象年と異なる日付・未知または空の根拠・空の `source_key`・同じ `source_key` の重複は、補正せずエラーにする（行番号だけを表示し、出力フォルダは作らない）。
+- どの売上とも一致しない判断（資料の差し替え等）はエラーにせず、件数を `manifest.json` と画面に表示する。
+- `sales.csv` には `revenue_date_basis` 列を末尾に追加（既存の列の位置は変えない）。人間確認用 Excel の売上一覧に「売上計上日の根拠」列、集計の「売上計上日 確定（件）」は `human_confirmed` の件数。
+- ファイルが無い場合は従来と同じ動作。

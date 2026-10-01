@@ -31,6 +31,7 @@ SALES_SHEET_COLUMNS: list[tuple[str, str, str]] = [
     ("資料日付（請求日等）", "document_date", "date"),
     ("売上計上日", "revenue_date", "date"),
     ("売上計上日の状態", "revenue_date_status", "text"),
+    ("売上計上日の根拠", "revenue_date_basis", "text"),
     ("業務期間（開始）", "service_period_from", "date"),
     ("業務期間（終了）", "service_period_to", "date"),
     ("業務対象月", "service_period_month", "text"),
@@ -189,8 +190,8 @@ def build_summary_rows(sales: list[dict], invoice_documents: Counter,
                          ("needs_review", "警告・欠落等があり人間の確認が必要"),
                          ("reviewed", "人間が確認済み（プログラムは設定しない）")):
         rows.append([f"review_status = {status}（件）", review.get(status, 0), note])
-    confirmed = sum(1 for s in sales if s.get("revenue_date"))
-    rows.append(["売上計上日 確定（件）", confirmed, None])
+    confirmed = sum(1 for s in sales if s.get("revenue_date_status") == "human_confirmed")
+    rows.append(["売上計上日 確定（件）", confirmed, "人間の判断（revenue_dates.csv）で確定したもの"])
     rows.append(["売上計上日 未確定（件）", total - confirmed, "請求日を売上計上日として自動で補完していない"])
 
     rows.append(["■ 金額（判明している値だけの合計。不明な値を 0 として扱っていない）", None, None])
