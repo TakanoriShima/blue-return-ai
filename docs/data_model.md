@@ -1,6 +1,6 @@
 # 共通売上データモデル 設計書
 
-- 状態: **MVP-1 で実装済み**（Excel 請求書・`template_a` の範囲）。MVP-2 以降の範囲は設計・実装継続中
+- 状態: **MVP-1 で実装済み**（Excel 請求書・`template_a` の範囲）。MVP-2 で架空の内税・源泉徴収型書式 `template_b` を追加済み。MVP-2 以降の範囲は設計・実装継続中
 - 対象スキーマバージョン: `0.1`
 - 本書に記載するデータ例は、すべて **完全な架空データ** です。
 
@@ -173,6 +173,12 @@ LMS テキスト ──→ LMS テキストアダプター ───┘
 | `unknown`（不明） | 資料の値 | 資料の値 | 資料の値 | 判明している項目のみ検証し、`needs_review` とする |
 
 - 内税で税額が資料に記載されていない場合、`tax_amount` は null とする（プログラムが逆算した値を資料の値として扱わない）。
+- 内税で `net_amount` が資料に記載されていない場合に限り、以下が **すべて** 成立するときだけ、共通のレコード生成処理（アダプターではない）で `net_amount = gross_amount - tax_amount` を計算し、`calculated_fields` に `net_amount` を記録する（MVP-2 で実装）。
+  - `tax_treatment` が `inclusive`
+  - `net_amount` が null（資料の値を上書きしない）で、`net_amount` に読み取り時の警告が無い
+  - `gross_amount` と `tax_amount` がともに null でない
+  - `gross_amount >= tax_amount`
+  - いずれかを満たさない場合は計算せず null のままとする。税額そのものは計算しない（資料に記載された 2 つの値の差を取るだけ）。
 - `tax_treatment = none` は「資料上、消費税が明示的に 0 またはかからないと確定している」場合に限る。消費税の記載が無いだけの場合は `unknown` とする。
 
 ### 5.3 源泉徴収（`withholding_status` × `withholding_tax`）
@@ -238,7 +244,7 @@ expected_payment_amount = gross_amount - withholding_tax - sum(deductions[].amou
 | `AMOUNT_NOT_INTEGER` | 円単位の整数として解釈できない金額値。非整数の数値（Excel の表示上は整数でも内部値が小数の場合を含む）や、金額として解釈できない文字列等を含む。値は丸めず null とする | error |
 | `AMOUNT_NEGATIVE` | 金額が負 | error |
 | `NET_TAX_GROSS_MISMATCH` | `net_amount + tax_amount != gross_amount`（§5.2 の条件下） | error |
-| `LINE_ITEMS_SUM_MISMATCH` | 明細の合計が `net_amount`（外税）または `gross_amount`（内税）と一致しない | error |
+| `LINE_ITEMS_SUM_MISMATCH` | 明細の合計が、`tax_treatment` が `exclusive`（外税）または `none`（消費税なし）の場合は `net_amount`、`inclusive`（内税）の場合は `gross_amount` と一致しない（`unknown` の場合は検証しない） | error |
 | `LINE_ITEM_AMOUNT_MISMATCH` | 明細の `quantity × unit_price` が `amount` と一致しない（§6） | warning |
 | `TAX_RATE_MISMATCH` | `tax_amount` が `net_amount × tax_rate` の切捨て・四捨五入・切上げのいずれとも一致しない | warning |
 | `WITHHOLDING_INCONSISTENT` | §5.3 の組み合わせ表に無い組み合わせ | error |
@@ -347,7 +353,7 @@ expected_payment_amount = gross_amount - withholding_tax - sum(deductions[].amou
 
 理由:
 
-- MVP-1 では、プログラムは原則として資料の値をそのまま取得するだけで、補完・推定を行わない。計算で導出するのは `expected_payment_amount` 等の限られた項目のみであり、それを `calculated_fields` に列挙すれば十分区別できる。
+- MVP-1 では、プログラムは原則として資料の値をそのまま取得するだけで、補完・推定を行わない。計算で導出するのは `expected_payment_amount`（§5.5）、MVP-2 で追加した内税の `net_amount`（§5.2）等の限られた項目のみであり、それを `calculated_fields` に列挙すれば十分区別できる。
 - 人間による修正は、MVP-1 では次の §8.4 の「ファイルを分ける」方式で区別できる。
 - 項目ごとの由来管理は、人間の修正結果をシステムへ取り込む機能（MVP-1 の範囲外）と同時に設計するほうが、手戻りが少ない。
 
@@ -429,9 +435,17 @@ MVP-1 では、データ構造を複雑にせず、**ファイルを分けるこ
 - **公開されるコード・テスト・sample_data では、実在の取引先名・サービス名を使わない**（例：`template_a`、`client_x` 等の汎用名を使う）。
 - 実在の取引先とテンプレートの対応表は、`data/` 配下等の Git 管理対象外の場所に置く。
 
-## 10. MVP-1: テンプレート別アダプター
+## 10. テンプレート別アダプター（MVP-1 / MVP-2）
 
-MVP-1 は「テンプレート別アダプター → 共通モデル」という構造で実装済みである（架空の書式 `template_a` のアダプター）。
+「テンプレート別アダプター → 共通モデル」という構造で実装済みである。現在のアダプターは、いずれも完全な架空の書式に対するもの。
+
+| テンプレート | 追加段階 | 書式の性質 | 税の扱い（既定値） | 主な割り当て |
+| --- | --- | --- | --- | --- |
+| `template_a` | MVP-1 | 外税型 | `exclusive`・10% | 税抜金額・消費税額・税込総額・源泉徴収税額・振込予定額を資料から取得 |
+| `template_b` | MVP-2 | 内税・源泉徴収型 | `inclusive`・10% | 帳票上の「小計」を `gross_amount`、「（内消費税）」を `tax_amount` として取得。税抜金額の欄は無く、`net_amount` は §5.2 の条件で計算 |
+
+- テンプレートは CLI の `--template` で明示的に指定する（既定は `template_a`）。テンプレートの自動判定は行わない。
+- 同じラベル文字列（例：「小計」）でも書式ごとに意味が異なるため、ラベルから項目を推測せず、各テンプレート定義のセル位置で割り当てる。ラベルは書式の確認（`TEMPLATE_LABEL_MISMATCH`）にのみ使う。
 
 ```
 完全な架空 Excel 請求書（Python スクリプトで生成）

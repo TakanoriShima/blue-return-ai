@@ -6,22 +6,23 @@ from pathlib import Path
 
 import pytest
 
-from blue_return_ai import template_a
+from blue_return_ai import sample_template_b, template_a
 from blue_return_ai.sales_record import build_sales_record
 from blue_return_ai.sample_template_a import write_sample
 from blue_return_ai.validation import validate
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_INVOICE = REPO_ROOT / "sample_data" / "invoices" / "template_a_sample.xlsx"
+SAMPLE_INVOICE_B = REPO_ROOT / "sample_data" / "invoices" / "template_b_sample.xlsx"
 
 
-def process(path: Path, **validate_options) -> dict:
-    source_hash, extracted, issues = template_a.read(path)
+def process(path: Path, template=template_a, **validate_options) -> dict:
+    source_hash, extracted, issues = template.read(path)
     record = build_sales_record(
         extracted=extracted,
         issues=issues,
         source_hash=source_hash,
-        source_name=template_a.SOURCE_NAME,
+        source_name=template.SOURCE_NAME,
     )
     return validate(record, **validate_options)
 
@@ -47,6 +48,24 @@ def make_invoice(tmp_path):
         workbook_hook(workbook)
         workbook.save(path)
         return path
+
+    return _make
+
+
+@pytest.fixture
+def sample_invoice_b() -> Path:
+    assert SAMPLE_INVOICE_B.exists(), "sample_data の架空請求書（template_b）がありません"
+    return SAMPLE_INVOICE_B
+
+
+@pytest.fixture
+def make_invoice_b(tmp_path):
+    """架空の template_b 請求書を、セルを差し替えて tmp_path に作る。"""
+    counter = {"n": 0}
+
+    def _make(overrides: dict | None = None) -> Path:
+        counter["n"] += 1
+        return sample_template_b.write_sample(tmp_path / f"invoice_b_{counter['n']}.xlsx", overrides)
 
     return _make
 

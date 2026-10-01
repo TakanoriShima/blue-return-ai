@@ -51,6 +51,13 @@ def build_sales_record(
         "calculated_fields": [],
     }
 
+    net_cell_has_issue = any(i["field"] == "net_amount" for i in issues)
+    if record["net_amount"] is None and not net_cell_has_issue:
+        calculated = calculate_inclusive_net_amount(record)
+        if calculated is not None:
+            record["net_amount"] = calculated
+            record["calculated_fields"].append("net_amount")
+
     expected_cell_has_issue = any(i["field"] == "expected_payment_amount" for i in issues)
     if record["expected_payment_amount"] is None and not expected_cell_has_issue:
         calculated = calculate_expected_payment(record)
@@ -59,6 +66,20 @@ def build_sales_record(
             record["calculated_fields"].append("expected_payment_amount")
 
     return record
+
+
+def calculate_inclusive_net_amount(record: dict) -> int | None:
+    """内税の資料に税抜金額の記載が無い場合のみ、税込総額 − 内消費税額で計算する。
+
+    税額そのものは計算しない。資料に記載された gross_amount と tax_amount の差を取るだけで、
+    いずれかが不明、または矛盾（税額が総額を超える）している場合は計算しない。
+    """
+    if record["tax_treatment"] != "inclusive" or record["net_amount"] is not None:
+        return None
+    gross, tax = record["gross_amount"], record["tax_amount"]
+    if gross is None or tax is None or gross < tax:
+        return None
+    return gross - tax
 
 
 def calculate_expected_payment(record: dict) -> int | None:

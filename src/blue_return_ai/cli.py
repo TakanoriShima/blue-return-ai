@@ -1,7 +1,8 @@
-"""MVP-1 のコマンドライン実行。
+"""コマンドライン実行。
 
-    python -m blue_return_ai.cli <Excelファイル...> [--out-dir DIR] [--target-year YYYY]
+    python -m blue_return_ai.cli <Excelファイル...> [--template NAME] [--out-dir DIR] [--target-year YYYY]
 
+- テンプレートは --template で明示する（既定: template_a）。自動判定はしない。
 - 出力先の既定値は data/output（Git 管理対象外）。
   リポジトリ内では data/ 配下以外への出力を拒否する。
 - 画面には実データの値・元ファイル名を表示しない
@@ -15,7 +16,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from . import template_a
+from . import template_a, template_b
 from .output import (
     find_records_by_source_hash,
     write_line_items_csv,
@@ -28,7 +29,10 @@ from .validation import validate
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_DIR = REPO_ROOT / "data" / "output"
 
-TEMPLATES = {template_a.SOURCE_NAME: template_a}
+TEMPLATES = {
+    template_a.SOURCE_NAME: template_a,
+    template_b.SOURCE_NAME: template_b,
+}
 
 
 class UnsafeOutputDirError(Exception):
@@ -102,9 +106,10 @@ def run(inputs: list[Path], template_name: str, out_dir: Path,
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Excel 請求書を共通 sales_record へ変換・検証する（MVP-1）")
+    parser = argparse.ArgumentParser(description="Excel 請求書を共通 sales_record へ変換・検証する")
     parser.add_argument("inputs", nargs="+", type=Path, help="Excel 請求書（.xlsx）")
-    parser.add_argument("--template", default=template_a.SOURCE_NAME, choices=sorted(TEMPLATES))
+    parser.add_argument("--template", default=template_a.SOURCE_NAME, choices=sorted(TEMPLATES),
+                        help="適用するテンプレート（既定: template_a。自動判定はしない）")
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR,
                         help="出力先（既定: data/output）")
     parser.add_argument("--target-year", type=int, default=None,

@@ -12,7 +12,7 @@
 
 最終的な申告そのものを AI に任せることは目的とせず、国税庁の確定申告書等作成コーナー・e-Tax 等につなげるための **経理支援** を目的とします。
 
-現在は開発初期段階です。**MVP-1（架空の Excel 請求書 → 共通売上データ → 検証 → JSON / 確認用 CSV）は完了** しており、次の開発段階は **MVP-2（異なる Excel 書式への対応）** です。PDF・LMS・銀行明細・経費・仕訳・帳簿・生成 AI による処理は未実装です。
+現在は開発初期段階です。**MVP-1（架空の Excel 請求書 → 共通売上データ → 検証 → JSON / 確認用 CSV）は完了**、**MVP-2 は架空の内税・源泉徴収型書式 `template_b` の追加・テストまで完了** しており、次の開発段階は **MVP-3（テキスト PDF の支払明細への対応）** です。PDF・LMS・銀行明細・経費・仕訳・帳簿・生成 AI による処理は未実装です。
 
 ## ディレクトリ構成
 
@@ -85,6 +85,7 @@ pip install -e .
 pip install pytest
 python -m pytest
 python -m blue_return_ai.cli sample_data/invoices/template_a_sample.xlsx --target-year 2026
+python -m blue_return_ai.cli sample_data/invoices/template_b_sample.xlsx --template template_b --target-year 2026
 ```
 
 - `pip install -e .` 後は `PYTHONPATH=src` の指定は不要。
@@ -107,7 +108,7 @@ python -m blue_return_ai.cli sample_data/invoices/template_a_sample.xlsx --targe
 - **入金照合を前提とする**: 売上資料 → `expected_payment_amount` → 銀行明細の入金 → 照合候補 → 人間による確認 → 入金確定、という流れへ拡張できる構造にする。
 - **金額は整数（円）で扱う**: float は使わない。
 
-### 実装済みの重要な設計ルール（MVP-1 時点）
+### 実装済みの重要な設計ルール（MVP-1 / MVP-2 時点）
 
 - **`record_id`**: `sales_record` 自体を識別する UUID。`source_hash` や資料の内容から生成しない。
 - **`source_hash`**: 元ファイル内容の SHA-256。出力先の既存データと一致した場合は **重複取込候補としてスキップ** し、自動的に別の売上として登録しない。
@@ -120,11 +121,35 @@ python -m blue_return_ai.cli sample_data/invoices/template_a_sample.xlsx --targe
 - **Excel の保護**: 元の Excel は読み取るだけで、保存・上書きしない。数式セルのキャッシュ値が無い場合は推測せず null とし警告する。
 - **出力先**: 既定は `data/output/`。リポジトリ内では `data/` 配下以外への出力を拒否する。
 
+### Excel テンプレートの設計ルール（MVP-2 時点）
+
+- 実装済みのテンプレートは、いずれも **完全な架空書式** である。
+  - `template_a`: 外税型
+  - `template_b`: 内税・源泉徴収型（帳票上の「小計」が税込総額を意味し、税抜金額の欄は無い）
+- テンプレートごとに、セル位置と項目の意味をテンプレート定義で明示する。
+- 同じラベル文字列でも書式によって意味が異なる可能性があるため、**ラベル文字列から共通項目の意味を推測しない**。ラベルはテンプレートの書式確認（`TEMPLATE_LABEL_MISMATCH`）に使い、実際の項目割り当てはテンプレート定義に従う。
+- テンプレートの自動判定は現時点では行わない。CLI の `--template` で明示的に指定する（既定は `template_a`）。
+- `template_a` / `template_b` には一部重複コードがあるが、現時点では過度な共通化を行わない。3 つ目以降のテンプレート追加時に、実際に共通化の必要性が確認できた場合に共通ヘルパーへの切り出しを検討する。**汎用テンプレートフレームワークを先に作り込まない。**
+
+### 内税の `net_amount`（MVP-2 時点）
+
+`tax_treatment == "inclusive"` で資料に `net_amount` の記載が無い場合は、次の条件を **すべて** 満たすときだけ、共通の `sales_record` 生成処理で `net_amount = gross_amount - tax_amount` を計算してよい。
+
+- `net_amount` が None
+- `net_amount` に読み取り時の issue が無い
+- `gross_amount` が None ではない
+- `tax_amount` が None ではない
+- `gross_amount >= tax_amount`
+
+- 計算した場合は `calculated_fields` に `"net_amount"` を記録する。
+- この計算をテンプレートアダプター内で行わない。計算値を資料から取得した値として扱わない。
+- `tax_amount` 自体を逆算・推定しない。
+
 ### MVP の開発順序
 
 1. MVP-1: 架空の Excel 請求書 → openpyxl → 共通売上データ → 検証 → JSON / 確認用 CSV → pytest（**完了**）
-2. MVP-2: 異なる Excel 書式への対応（**次の開発段階**）
-3. MVP-3: テキスト PDF の支払明細への対応
+2. MVP-2: 異なる Excel 書式への対応（**架空の `template_b` の追加・テストまで完了**）
+3. MVP-3: テキスト PDF の支払明細への対応（**次の開発段階**）
 4. MVP-4: LMS からコピーしたテキストへの対応
 5. MVP-5: 銀行明細 CSV の取込
 6. MVP-6: 売上情報と銀行入金の照合候補生成
