@@ -52,7 +52,7 @@ LMS テキスト ──→ LMS テキストアダプター ───┘
 | `schema_version` | str | 不可 | ◎ | データ形式のバージョン。初版は `"0.1"`。 |
 | `record_id` | str | 不可 | ◎ | `sales_record` 自体を識別する内部 ID（UUID）。`source_hash` からは生成しない。§9 参照。 |
 | `document_type` | enum | 不可 | ◎ | `invoice` / `payment_statement` / `lms_statement`。MVP-1 は `invoice` のみ。 |
-| `source_type` | enum | 不可 | ◎ | `excel` / `pdf` / `lms_text`。MVP-1 は `excel` のみ。 |
+| `source_type` | enum | 不可 | ◎ | `excel` / `pdf` / `lms_text` / `manual`（人間が手入力 CSV で記入した資料。年間処理で追加予定・未実装）。MVP-1 は `excel` のみ。 |
 | `source_name` | str | 不可 | ◎ | 取引先・サービスを識別する内部名称（例：`template_a`）。§9.6 の注意を参照。 |
 | `source_hash` | str | 不可 | ◎ | 元資料ファイル内容の SHA-256 ハッシュ値。同一ファイルの再取込・重複検出に使う。`record_id` とは独立。§9 参照。 |
 | `external_id` | str | 可 | ○ | LMS 等の外部システム側の識別子。`record_id` / `source_hash` とは別概念。無い場合は null。MVP-1 では常に null。 |
@@ -590,3 +590,207 @@ bank_transaction ┘
 6. 確認用 CSV の文字コード（UTF-8 BOM 付きで Excel から問題なく開けるか）。
 7. Excel と送付済み PDF の内容が食い違った場合に、どちらを正とするか。
 8. 対象年・金額上限・支払期限の許容日数などの設定値。
+
+## 16. 年間処理（全件再生成方式）のための追加定義
+
+2026 年の実会計資料を処理する年間処理（`python -m blue_return_ai.annual`）のための定義。**現時点で実装済みなのは、実行単位の作成・資料一覧・`source_key`・売上 Excel（template_c 等）／カード CSV／銀行 CSV の取込と要確認一覧まで**（§17）であり、照合、仕訳、集計は未実装。
+
+### 16.1 全件再生成と実行単位
+
+- 年間処理は追記型ではなく、実行のたびに `data/` 配下の全資料から作り直す。
+- 出力先は `data/output/annual/<run-id>/`。`run-id` は「対象年_実行日時_乱数」で一意にし、既存の出力先は上書きしない。
+- 人間の判断は出力とは別に `data/decisions/` に保存し、再生成のたびに読み直して適用する。
+
+### 16.2 `source_key`（実行をまたいで安定するキー）
+
+| 項目 | 内容 |
+| --- | --- |
+| 目的 | 人間の判断ファイルと、資料・取引を実行をまたいで紐づける |
+| `record_id` との違い | `record_id` は実行ごとに生成する UUID。`source_key` は同じ資料・同じ位置なら常に同じ値 |
+| 形式 | `<namespace>-<キーの版>-<SHA-256 の先頭 32 文字>`（例：`sales-1-…`） |
+| namespace | `sales` / `bank` / `card` / `household` / `document` |
+| 売上資料 | `sales_source_key(source_hash, position)`：元ファイルの SHA-256 と資料内の位置（1 始まり）から作る |
+| 個人情報 | 構成要素をハッシュ化するため、キーに個人情報そのものは含まれない |
+
+- 関数は `src/blue_return_ai/keys.py` に実装済み。`sales_record` への項目追加は、年間処理で売上を取り込む段階で行う（既存の template_a / template_b の出力は変更していない）。
+- 銀行・カード取引のキーは §17.4 を参照。
+
+### 16.3 `documents_inventory`（資料一覧）
+
+年間処理の実行ごとに、設定した各フォルダの全ファイルを一覧化する（ファイルの中身は解析しない）。
+
+| 列 | 内容 |
+| --- | --- |
+| `document_key` | `document-` ＋ SHA-256 の先頭 16 文字 |
+| `category` | `invoices` / `bank` / `credit_card` / `household` |
+| `extension` | 拡張子 |
+| `size_bytes` | ファイルサイズ |
+| `sha256` | ファイル内容の SHA-256 |
+| `status` | 下表 |
+| `status_source` | `program`（プログラムが決めた）/ `human`（`data/decisions/documents.csv` で人間が指定） |
+| `duplicate_of` | 同じ内容のファイルが先に出現していれば、その `document_key` |
+| `relative_path` | リポジトリ直下からの相対パス（実ファイル名を含むため、出力は `data/` 配下のみ。共有用の表示・manifest には含めない） |
+| `note` | 補足（例：`temporary_file`） |
+
+| `status` | 意味 |
+| --- | --- |
+| `imported` | 取込処理で取り込んだ |
+| `manual` | 手入力 CSV で対応した |
+| `cross_check_only` | 照合用の資料（例：Excel と同じ請求の PDF）。売上等には使わない |
+| `unsupported` | 取込対象外（対象外の拡張子、Excel の一時ファイル等） |
+| `unresolved` | 取込対象だが未処理・要対応（PDF、テンプレートに合わない Excel、書式の合わない CSV、読み取りに失敗した資料、取込処理を設定していない種類の資料） |
+
+- 取込処理が取り込むのは、プログラムが `unresolved` とした資料だけ。人間が `data/decisions/documents.csv` で状態を指定した資料は取り込まない。
+- 同じ内容のファイル（`duplicate_of` があるもの）は取り込まず、`unsupported`（`note` = `duplicate_file`）にする。
+- `note` には取り込めなかった理由（`template_sheet_not_found` / `format_mismatch` / `read_failed`）を記録する。
+
+### 16.4 照合結果の状態（設計・未実装）
+
+売上と銀行入金の照合など、プログラムが一致候補を出す処理では、次の状態を区別する。
+
+| 状態 | 意味 | 集計での扱い |
+| --- | --- | --- |
+| `confirmed` | 人間が確認済み | 確定値に使う |
+| `auto_candidate` | プログラム上は一致候補だが、人間は未確認 | 暫定の参考値として別欄に示す。確定値には混ぜない |
+| `unresolved` | 不明・要確認 | 確定値から除外し、件数・金額を別欄に示す |
+
+将来の `blue_return_summary` では、確定値・自動一致候補・要確認を区別して表示する。
+
+## 17. 年間処理の取込（売上・カード・銀行）
+
+設定ファイル（`data/config/annual.json`）の `processors` で、資料の種類ごとの取込方法を汎用の識別子で指定する。公開コードには金融機関名・サービス名・取引先名を書かない。
+
+```json
+"processors": {
+  "invoices": {"templates": ["template_c", "template_instructor"]},
+  "credit_card": {"format": "card_csv_a"},
+  "bank": {"format": "bank_csv_a", "options": {"header_row": 13}}
+}
+```
+
+- `invoices.template`（1 つ）または `invoices.templates`（複数）：`template_a` / `template_b` / `template_c` / `template_instructor`。複数の場合は、各テンプレートのシート名がブックにあるかだけで振り分ける（ファイル名・取引先名・金額は使わない）。該当するシートが無い Excel は `template_sheet_not_found`、複数のテンプレートのシートがある Excel は `template_ambiguous` として取り込まず `unresolved` のまま。シートが見つかった後のラベル構造の確認は各テンプレートの中で行う（合わなければ `TEMPLATE_LABEL_MISMATCH`）。PDF からは売上を作らない。
+- `credit_card.format` / `bank.format`：CSV の書式。`options` で `encoding` / `header_row` / `columns` を上書きできる。
+- 指定の無い種類は取り込まず、資料一覧だけを作る。
+
+### 17.1 template_c（売上 Excel）
+
+同じシート名で、明細見出しと集計欄のラベル構成が異なる 5 つのパターンが人間の構造調査で確認されている。パターンはファイル名・取引先名・金額では判定せず、ラベルの集合だけで判定する。
+
+| パターン | 明細見出し（「品 番 • 品 名」以外） | 集計欄のラベル → 項目 | 税の扱い（テンプレート定義） |
+| --- | --- | --- | --- |
+| A | 数 量（日）／単 価／金 額 | 小計（税抜き）→ `net_amount`、消費税（10%）→ `tax_amount`、税込合計金額 → `gross_amount`、源泉徴収税額 → `withholding_tax`、振込依頼金額 → `expected_payment_amount` | `exclusive`・10% |
+| B | 数 量（時間）／単 価／合計金額(内税) | 合計金額(税込み) → `gross_amount`、源泉徴収税(10.21%) → `withholding_tax`、振込金額(控除後支払額) → `expected_payment_amount`、報酬額(源泉対象) → 共通モデルに割り当てない（`withholding_base` として確認用に保持） | `inclusive`・税率は記載なし（null） |
+| C | 数 量（時間）／単 価／金 額 | 小計 → `net_amount`、消費税（10%）→ `tax_amount`、合計金額 → `gross_amount` | `exclusive`・10% |
+| D | 数 量／単 価／金額 | 小計 → 共通モデルに割り当てない（`document_subtotal` として確認用に保持） | `unknown` |
+| E | 数 量（時間）／単 価／合計金額(内税)（B と同じ） | 合計(税込) → `gross_amount`、小計(税抜) → `net_amount`、消費税(内税10%) → `tax_amount`、源泉徴収税額 → `withholding_tax`、合計（差引支払額）→ `expected_payment_amount` | `inclusive`・10% |
+
+判定の規則
+
+- ラベルの比較は NFKC 正規化と空白除去の後の完全一致。全角・半角の括弧や空白の違いは同じとみなすが、文字が違えば別のラベル（例：「品番・品名」と「品番•品名」は別）。空白除去により「金 額」と「金額」は同じ文字列になるため、パターンは 1 つのラベルではなく見出し全体の組み合わせで区別する。
+- 「品 番 • 品 名」がシート内に 1 つだけあり、その行のラベルの集合が、いずれかのパターンの明細見出しと完全に一致すること。
+- 見出しより下にある「既知の集計ラベル（A〜E のいずれかに含まれるもの）」の集合が、そのパターンの集計ラベルと完全に一致し、各 1 つであること（不足・重複・他パターンのラベルの混在は不可）。
+- 見出しと集計欄の両方が一致するパターンがちょうど 1 つの場合だけ採用する。B と E は明細見出しが同じだが、集計欄のラベル構成で区別し、別名として扱わない。
+- 判定できない場合は推測せず `TEMPLATE_LABEL_MISMATCH`（`field` が null と `line_items`）とし、金額・明細を割り当てない。
+
+値の取得
+
+| 項目 | 取得方法 |
+| --- | --- |
+| `document_date` | 「請求日：」ラベル（全パターン必須）の右側。日付シリアル値は §17.1.1 |
+| `customer` | `B3`（位置を確認済みのパターン A のみ。他は null） |
+| 集計欄の各値・ご請求金額 | ラベルと同じ行で、ラベルより右にある最も近い空でないセル。値が無ければ null。型に合わなければ `AMOUNT_NOT_INTEGER` 等 |
+| `line_items` | 見出しの次の行から、最も上の集計ラベルの直前まで。全項目が空の行は飛ばす。値は各見出しと同じ列。単位は見出しの「（日）」「（時間）」から（D は null） |
+| 書式の確認 | パターン A のみ `B1` の表題も確認する |
+| `service_period` / `description` / `payment_due` | この書式群には欄が無いため null（`FIELD_MISSING`） |
+
+- 帳票に無い・意味が確認できない項目は null とし、0・`none`・計算値で埋めない。
+  - B：`net_amount` / `tax_amount` / `tax_rate` は null（`FIELD_MISSING`）。内税の税抜金額の計算（§5.2）も、内消費税額が無いため行われない。
+  - C：源泉徴収欄・支払額欄が無いため、`withholding_status` は `unknown`、`withholding_tax` / `expected_payment_amount` / `deductions` は null。
+  - E：すべての金額が帳票の値（税抜金額も帳票の「小計(税抜)」であり計算しない）。整合は既存の検証（総額・明細合計・振込額）で確認する。
+  - D：`net_amount` / `tax_amount` / `gross_amount` / `withholding_tax` / `expected_payment_amount` / `deductions` は null、`tax_treatment` は `unknown`。
+- `deductions` は、振込額の欄があり控除欄が無いパターン（A・B・E）だけ `[]`（テンプレート定義）。
+- 「ご請求金額」の値は `document_total` として確認用に保持する（共通モデルの金額には割り当てない）。
+- 氏名欄など、売上データに不要な欄は読み取らない。
+- 売上計上日（`revenue_date`）は設定しない。`sales.csv` では `revenue_date` を空欄、`revenue_date_status` を `unconfirmed` とし、要確認一覧に `REVENUE_DATE_UNCONFIRMED` を出す。
+- `sales.csv` には、確認用 CSV の列（§8.5）に `source_key`・`document_key`・`revenue_date`・`revenue_date_status` と、確認用の値 `template_pattern`・`document_total`・`document_subtotal`・`withholding_base` を加える。`sales_record` 自体の項目は変更していない。
+
+#### 17.1.2 template_instructor（シート「講師」）
+
+template_c とは構造が大きく異なるため、独立したアダプターとする。
+
+| 項目 | 取得方法 |
+| --- | --- |
+| 書式の確認 | シート「講師」。明細見出し「商品名」「数量」「単位」「単価(円)」「税率」「金額(円)」が同じ行に各 1 つ、確認済みの列（A / D / E / F / G / H）にあること。集計欄「小計」「消費税」「源泉税額」「合計」が見出しより下に各 1 つ、F 列にあること |
+| `document_date` | 「請求日」ラベルの右側（日付セル・文字列・シリアル値。§17.1.1） |
+| `line_items` | 見出しの次の行から、最初の集計欄・税率別内訳のラベルの直前まで。全項目が空の行は飛ばす。明細ごとの税率は「10%」・10・0.1 をパーセントの整数にする |
+| `net_amount` / `tax_amount` / `withholding_tax` | 「小計」「消費税」「源泉税額」の右側の値 |
+| 「合計」 | 源泉徴収控除後の支払額かを構造だけでは確定できないため、`expected_payment_amount` に割り当てず `document_total`（確認用）として保持 |
+| `gross_amount` | 計算で作らない（null） |
+| `tax_treatment` | 税率別内訳（「税率別内訳」「税抜金額」「消費税額」）がそろっていれば `exclusive`、なければ `unknown`。税率別内訳の数値は使わない |
+| `withholding_status` | 源泉税額が 0 → `none`、正の値 → `applied`、空欄・読めない → `unknown` |
+| `tax_rate`（記録全体） / `customer` / `description` / `payment_due` / `service_period` / `deductions` / `expected_payment_amount` | null（`FIELD_MISSING`） |
+
+- 構造が確認できない場合は `TEMPLATE_LABEL_MISMATCH` とし、金額・明細を割り当てない。帳票パターン名は `instructor`（確認できない場合は `instructor_unidentified`）。
+
+#### 17.1.1 Excel の日付シリアル値
+
+- template_c の請求日セルが（表示形式が日付でない）数値の場合は、Excel の日付シリアル値として、openpyxl の `from_excel` でブックの基準日（1900 年基準 / 1904 年基準）に従って日付に変換する。
+- 1 未満・9999-12-31 を超える値・真偽値・非有限値は `DATE_INVALID`。日付セル・文字列の日付は従来どおり。
+- template_a / template_b の日付（`parse_date`）は変更していない（数値は従来どおり `DATE_INVALID`）。
+
+### 17.2 カード取引（card_csv_a）
+
+| 項目 | 内容 |
+| --- | --- |
+| `source_key` / `source_hash` / `document_key` / `row_number` | キー（§17.4）、元ファイルの SHA-256、資料一覧のキー、CSV 上の行番号 |
+| `record_status` / `duplicate_of_document` | `active` / `duplicate`（§17.4）と、重複元の資料 |
+| `use_date` | 利用日（経費計上日の候補）。支払月を経費の発生日として扱わない |
+| `usage_category` / `user_category` / `merchant` / `point_target` / `installment_count` / `note` | 利用区分・利用者区分・利用店・ポイント対象・今回回数・備考（文字列のまま） |
+| `amount` / `payment_amount` | 利用金額と今回の支払金額（別の項目。負の値も読み込む） |
+| `business_classification` / `account_category` | `unknown` / null（利用店名から推測しない） |
+| `review_status` / `warnings` | 警告があれば `needs_review` |
+
+- ヘッダーより前の行は解析しない。ヘッダーが書式と一致しなければ資料全体を取り込まない（`CSV_HEADER_MISMATCH`）。
+- 空行は飛ばす。列数の違う行・利用日を解釈できない行（合計行等）は取引にせず `ROW_NOT_TRANSACTION`。
+- 警告：`CARD_NEGATIVE_AMOUNT`（負の利用金額）、`CARD_INSTALLMENT`（今回回数が 1 以外、または利用金額と支払金額が異なる）、`DATE_OUT_OF_TARGET_YEAR`、`FIELD_MISSING`、`AMOUNT_NOT_INTEGER`、`CLASSIFICATION_UNKNOWN`、`DUPLICATE_CANDIDATE`。
+
+### 17.3 銀行取引（bank_csv_a）
+
+| 項目 | 内容 |
+| --- | --- |
+| `source_key` / `source_hash` / `document_key` / `row_number` / `record_status` / `duplicate_of_document` | §17.2 と同じ |
+| `sequence` | 明細通番（文字列のまま） |
+| `transaction_date` | 日付（`YYYYMMDD` 形式にも対応） |
+| `withdrawal_amount` / `deposit_amount` | 出金額・入金額（別の項目。空欄は null、0 は 0） |
+| `balance` / `description` | 残高・取引内容 |
+| `classification` / `account_category` | `unknown` / null（摘要から推測しない） |
+| `review_status` / `warnings` | 警告があれば `needs_review` |
+
+- 警告：`BANK_AMOUNT_MISSING`（出金・入金とも空欄）、`BANK_BOTH_AMOUNTS`（両方に 0 以外の値）、`AMOUNT_NEGATIVE`、`FIELD_MISSING`（残高）、`DATE_OUT_OF_TARGET_YEAR`、`AMOUNT_NOT_INTEGER`、`CLASSIFICATION_UNKNOWN`、`DUPLICATE_CANDIDATE`。
+
+### 17.4 取引の `source_key` と重複除去
+
+| 種類 | キーの材料（すべて SHA-256 でハッシュ化） |
+| --- | --- |
+| カード | 利用日・利用店・利用金額・支払金額・今回回数・利用区分・利用者区分 ＋ ファイル内で同じ内容が何回目か |
+| 銀行 | 日付・出金額・入金額・残高・取引内容 ＋ ファイル内で同じ内容が何回目か |
+
+- ファイルの SHA-256 はキーに含めない。期間の重なる別の CSV に同じ取引があれば同じキーになり、2 件目以降は `record_status` = `duplicate` として残す（集計・要確認の対象外）。
+- 同じファイル内の、内容がまったく同じ正当な別取引は「何回目か」で区別し、消さない。
+- 銀行の明細通番は、ダウンロードの単位ごとに振り直される可能性があるためキーに含めない。残高を含めるため、同日・同額・同摘要の別取引も通常は区別できる。
+- 有効な取引のうち、主な内容（カード：利用日・利用店・利用金額、銀行：日付・出金額・入金額・取引内容）が同じでキーが異なるものには `DUPLICATE_CANDIDATE` を付け、消さずに人間の確認に回す。
+- **限界**：公開コードに秘密値を持たないため、日付・金額・摘要の候補が分かる人は総当たりでキーとの一致を確かめられる。キーは `data/` 配下の出力にだけ保存し、外部に共有しない。また、取引の内容が後から変わった CSV（摘要の表記変更等）は別の取引として扱われる。
+
+### 17.5 要確認一覧（`unresolved_items.csv`）
+
+| 列 | 内容 |
+| --- | --- |
+| `item_id` | 実行内の連番 |
+| `source_type` | `sales` / `card` / `bank` |
+| `source_key` / `document_key` | 対象のキー（資料単位・行単位の問題は資料のキー） |
+| `issue_code` / `severity` / `field` | 警告コード・重大度・対象項目（行単位の問題は `row <行番号>:<項目>`） |
+| `message` | コードの説明（実データの値は含めない） |
+| `decision_status` / `decision_value` / `decision_note` | 人間が判断を記入する列（空欄で出力） |
+
+- 売上・有効な取引の警告、資料単位の問題（`FILE_READ_FAILED` / `CSV_HEADER_MISMATCH`）、取引として読まなかった行（`ROW_NOT_TRANSACTION`）、売上計上日の未確定（`REVENUE_DATE_UNCONFIRMED`）を 1 つにまとめる。
+- 出力は実行ごとに作り直すため、判断を記入したファイルは別名で `data/decisions/` に保存する。判断ファイルを読み込んで反映する処理は次の段階で実装する。

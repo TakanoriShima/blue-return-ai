@@ -5,11 +5,14 @@
 
 from __future__ import annotations
 
+import math
 import re
 import unicodedata
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+
+from openpyxl.utils.datetime import WINDOWS_EPOCH, from_excel
 
 from .excel_reader import CellValue
 
@@ -23,10 +26,16 @@ _NO_YEAR_DATE_PATTERN = re.compile(r"^(\d{1,2})[/.月](\d{1,2})日?$")
 _MONTH_PATTERN = re.compile(r"^(\d{4})[-/.年](\d{1,2})月?分?$")
 _NO_YEAR_MONTH_PATTERN = re.compile(r"^(\d{1,2})月分?$")
 _AMOUNT_PATTERN = re.compile(r"^-?\d+$")
+_MAX_EXCEL_SERIAL = 2958465  # Excel で扱える最後の日付（9999-12-31）のシリアル値
 
 
 def _normalize_text(value: str) -> str:
     return unicodedata.normalize("NFKC", value).strip()
+
+
+def normalize_label(text: str) -> str:
+    """ラベル・見出しの比較用。NFKC 正規化し、空白をすべて除く（完全一致の比較に使う）。"""
+    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", text))
 
 
 def _formula_check(cell: CellValue) -> str | None:
@@ -150,3 +159,28 @@ def parse_month(cell: CellValue) -> Parsed:
     if _NO_YEAR_MONTH_PATTERN.match(text):
         return None, "DATE_AMBIGUOUS"
     return None, "DATE_INVALID"
+
+
+def parse_excel_date(cell: CellValue, epoch: datetime = WINDOWS_EPOCH) -> Parsed:
+    """テンプレート定義で「日付」と決まっているセル用。
+
+    表示形式が日付でない（標準の）数値セルは、Excel の日付シリアル値として openpyxl の
+    from_excel（ブックの epoch に従う）で日付に変換する。それ以外（datetime・文字列の日付）は parse_date と同じ。
+    範囲外・不正な数値は DATE_INVALID とする。
+    """
+    if (code := _formula_check(cell)) is not None:
+        return None, code
+    value = cell.value
+    if isinstance(value, bool):
+        return None, "DATE_INVALID"
+    if isinstance(value, (int, float)):
+        if not math.isfinite(value) or not 1 <= value <= _MAX_EXCEL_SERIAL:
+            return None, "DATE_INVALID"
+        try:
+            converted = from_excel(value, epoch=epoch)
+        except (ValueError, OverflowError, TypeError):
+            return None, "DATE_INVALID"
+        if not isinstance(converted, datetime):
+            return None, "DATE_INVALID"
+        return converted.date().isoformat(), None
+    return parse_date(cell)

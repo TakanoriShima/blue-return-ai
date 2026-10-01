@@ -1,0 +1,144 @@
+"""年間処理の設定ファイル（data/config/annual.json）の読み込み。
+
+設定ファイルは本人が作成し、data/ 配下に置く（Git 管理しない）。記入例は
+sample_data/config/annual.example.json を参照。
+
+    {
+      "version": 1,
+      "sources": {
+        "invoices": "data/invoices",
+        "bank": "data/bank",
+        "credit_card": "data/credit-card",
+        "household": "data/household"
+      },
+      "decisions_dir": "data/decisions",
+      "processors": {
+        "invoices": {"templates": ["template_c", "template_instructor"]},
+        "credit_card": {"format": "card_csv_a"},
+        "bank": {"format": "bank_csv_a"}
+      }
+    }
+
+- invoices は "template": "<名前>"（1 つ）または "templates": [...]（複数）で指定する。
+  複数の場合は、各テンプレートのシート名がブックにあるかで振り分ける（ファイル名・取引先名・金額は使わない）。
+
+- パスはリポジトリ直下からの相対パスで書き、data/ 配下だけを指定できる。
+- processors に、資料の種類ごとの取込方法を汎用の識別子で指定する（金融機関名・サービス名は書かない）。
+  指定の無い種類は取り込まず、資料一覧だけを作る。
+- CSV の書式は、必要なら "options" で上書きできる（encoding / header_row / columns）。
+  例: "bank": {"format": "bank_csv_a", "options": {"header_row": 13}}
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+CONFIG_VERSION = 1
+CATEGORIES = ("invoices", "bank", "credit_card", "household")
+
+
+class ConfigError(Exception):
+    """設定ファイルの誤り。メッセージに実データの値を含めない。"""
+
+
+@dataclass(frozen=True)
+class AnnualConfig:
+    sha256: str
+    sources: dict[str, Path]
+    decisions_dir: Path | None
+    processors: dict[str, dict]
+
+
+def _resolve_data_path(value: object, key: str, repo_root: Path) -> Path:
+    if not isinstance(value, str) or not value:
+        raise ConfigError(f"{key} はリポジトリ直下からの相対パスを文字列で指定してください")
+    relative = Path(value)
+    if relative.is_absolute() or relative.drive:
+        raise ConfigError(f"{key} は相対パスで指定してください")
+    resolved = (repo_root / relative).resolve()
+    if not resolved.is_relative_to((repo_root / "data").resolve()):
+        raise ConfigError(f"{key} は data/ 配下を指定してください")
+    return resolved
+
+
+def load_config(path: Path, repo_root: Path) -> AnnualConfig:
+    path = Path(path)
+    try:
+        raw = path.read_bytes()
+        data = json.loads(raw.decode("utf-8-sig"))
+    except FileNotFoundError:
+        raise ConfigError(
+            "設定ファイルが見つかりません（sample_data/config/annual.example.json を参考に作成してください）"
+        ) from None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError(f"設定ファイルを読み込めません: {type(error).__name__}") from None
+
+    if not isinstance(data, dict) or data.get("version") != CONFIG_VERSION:
+        raise ConfigError(f"設定ファイルの version は {CONFIG_VERSION} である必要があります")
+    sources = data.get("sources")
+    if not isinstance(sources, dict) or not sources:
+        raise ConfigError("設定ファイルの sources を指定してください")
+    unknown = set(sources) - set(CATEGORIES)
+    if unknown:
+        raise ConfigError(f"sources に指定できるのは {', '.join(CATEGORIES)} のみです")
+
+    resolved = {
+        category: _resolve_data_path(sources[category], f"sources.{category}", repo_root)
+        for category in CATEGORIES if category in sources
+    }
+    decisions = data.get("decisions_dir")
+    decisions_dir = (_resolve_data_path(decisions, "decisions_dir", repo_root)
+                     if decisions is not None else None)
+    return AnnualConfig(
+        sha256=hashlib.sha256(raw).hexdigest(),
+        sources=resolved,
+        decisions_dir=decisions_dir,
+        processors=_load_processors(data.get("processors")),
+    )
+
+
+PROCESSOR_KEYS = {"invoices": "template", "credit_card": "format", "bank": "format"}
+
+
+def _load_processors(value: object) -> dict[str, dict]:
+    """processors の構造だけを確認する（識別子が実在するかは annual 側で確認する）。"""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("processors はオブジェクトで指定してください")
+    unknown = set(value) - set(PROCESSOR_KEYS)
+    if unknown:
+        raise ConfigError(f"processors に指定できるのは {', '.join(PROCESSOR_KEYS)} のみです")
+    processors: dict[str, dict] = {}
+    for category, setting in value.items():
+        key = PROCESSOR_KEYS[category]
+        if category == "invoices" and isinstance(setting, dict) and "templates" in setting:
+            processors[category] = _load_invoice_templates(setting)
+            continue
+        if not isinstance(setting, dict) or not isinstance(setting.get(key), str):
+            raise ConfigError(f"processors.{category} には {key} を文字列で指定してください")
+        extra = set(setting) - {key, "options"}
+        if extra:
+            raise ConfigError(f"processors.{category} に指定できるのは {key} と options のみです")
+        options = setting.get("options", {})
+        if not isinstance(options, dict):
+            raise ConfigError(f"processors.{category}.options はオブジェクトで指定してください")
+        if category == "invoices" and options:
+            raise ConfigError("processors.invoices に options は指定できません")
+        processors[category] = {"id": setting[key], "ids": [setting[key]], "options": dict(options)}
+    return processors
+
+
+def _load_invoice_templates(setting: dict) -> dict:
+    """invoices の "templates": [...]（複数のテンプレートをシート名で振り分ける）。"""
+    if set(setting) != {"templates"}:
+        raise ConfigError("processors.invoices には template か templates の一方だけを指定してください")
+    templates = setting["templates"]
+    if (not isinstance(templates, list) or not templates
+            or not all(isinstance(t, str) and t for t in templates)
+            or len(set(templates)) != len(templates)):
+        raise ConfigError("processors.invoices.templates は重複の無いテンプレート名の配列で指定してください")
+    return {"id": ",".join(templates), "ids": list(templates), "options": {}}

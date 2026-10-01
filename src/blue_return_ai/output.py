@@ -152,6 +152,11 @@ def _write_csv(path: Path, columns: list[str], rows: Iterable[dict]) -> Path:
     return path
 
 
+def write_csv(path: Path, columns: list[str], rows: Iterable[dict]) -> Path:
+    """BOM 付き UTF-8・CSV インジェクション対策・上書き禁止で CSV を書く（汎用）。"""
+    return _write_csv(path, columns, rows)
+
+
 def write_review_csv(records: list[dict], path: Path) -> Path:
     """1 行 = 1 sales_record の確認用 CSV。"""
     return _write_csv(path, RECORD_COLUMNS, (record_to_row(r) for r in records))
