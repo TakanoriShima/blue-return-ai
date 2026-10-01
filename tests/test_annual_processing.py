@@ -89,7 +89,7 @@ def run_repo(repo):
 
 def test_all_outputs_are_created(repo):
     run_dir = run_repo(repo)["run_dir"]
-    assert sorted(p.name for p in run_dir.iterdir()) == sorted(annual.OUTPUT_FILES)
+    assert sorted(p.name for p in run_dir.iterdir()) == sorted(annual.output_files(2026))
     assert run_dir.parent == (repo / "data" / "output" / "annual").resolve()
 
 
@@ -236,6 +236,9 @@ def test_cli_prints_counts_only(repo, monkeypatch, capsys):
     assert "カード取引: 6 件" in text
     assert "銀行取引: 6 件" in text
     assert "CLASSIFICATION_UNKNOWN:" in text
+    # 表示してよいのは、プログラムが決めた出力ファイル名（人間確認用 Excel）だけ
+    assert "sales_summary_2026_provisional.xlsx" in text
+    text = text.replace("sales_summary_2026_provisional.xlsx", "")
     for value in ("架空", "1200", "50000", "77000", ".xlsx", ".csv") + tuple(FILE_NAMES):
         assert value not in text
 

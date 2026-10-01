@@ -37,8 +37,10 @@ PROCESSOR_EXTENSIONS = {"invoices": ".xlsx", "credit_card": ".csv", "bank": ".cs
 
 # テンプレートが共通モデルに割り当てずに返す確認用の値（template_c のみ。他のテンプレートでは空欄）
 SALES_REFERENCE_FIELDS = ["template_pattern", "document_total", "document_subtotal", "withholding_base"]
+# 会計用の売上金額（docs/data_model.md §17.7）。原資料の金額とは別の項目
+ACCOUNTING_FIELDS = ["accounting_sales_amount", "accounting_sales_amount_basis"]
 SALES_COLUMNS = ["source_key", "document_key", *RECORD_COLUMNS, "revenue_date", "revenue_date_status",
-                 *SALES_REFERENCE_FIELDS]
+                 *SALES_REFERENCE_FIELDS, *ACCOUNTING_FIELDS]
 CARD_COLUMNS = [
     "source_key", "document_key", "row_number", "record_status", "duplicate_of_document",
     "format_id", "use_date", "usage_category", "user_category", "merchant", "point_target",
@@ -250,9 +252,76 @@ def sales_rows(result: ProcessResult) -> list[dict]:
             "revenue_date": None,  # 売上計上日はプログラムが決めない
             "revenue_date_status": "unconfirmed",
             **item["reference"],
+            **item.get("accounting", dict.fromkeys(ACCOUNTING_FIELDS)),
         }
         for item in result.sales
     ]
+
+
+def decide_accounting_sales_amount(record: dict, reference: dict,
+                                   settings: dict | None) -> tuple[int | None, str | None]:
+    """会計用の売上金額（税込経理）と、その根拠を返す。決められなければ (None, None)。
+
+    原資料の金額（net / tax / gross 等）は変更しない。逆算・推測はしない。
+    - 年度の会計設定が「免税事業者・税込経理」の場合だけ決める（それ以外の組み合わせは未対応のため None）。
+    - gross_amount（税込総額）が判明していれば、その値。
+    - gross_amount が不明で、帳票上の値が税込の請求総額であると確認済みの場合（template_c のパターン D の
+      「ご請求金額」）だけ、その値。
+    - template_instructor は、帳票の「小計」（人間の確認により、源泉徴収前の税込報酬額。パーサーは net_amount
+      に保持）を使う。最終の「合計」（源泉徴収後）は使わない。条件は _instructor_subtotal を参照。
+    - それ以外は None（人間の確認対象）。0 は既知の 0 として扱う。
+    """
+    if not settings or settings.get("tax_status") != "exempt" \
+            or settings.get("consumption_tax_accounting") != "inclusive":
+        return None, None
+    gross = record.get("gross_amount")
+    if _is_amount(gross):
+        return gross, "gross_amount"
+    if (record.get("source_name") == template_c.SOURCE_NAME
+            and reference.get("template_pattern") == "D"):
+        total = reference.get("document_total")
+        if _is_amount(total):
+            return total, "document_total"
+    subtotal = _instructor_subtotal(record, reference)
+    if subtotal is not None:
+        return subtotal, "instructor_subtotal"
+    return None, None
+
+
+def _is_amount(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _instructor_subtotal(record: dict, reference: dict) -> int | None:
+    """template_instructor の「小計」の値。安全に確認できなければ None。
+
+    net_amount が「小計」ラベルから取得した値であると言えるのは、次をすべて満たす場合だけ:
+    - source_name が template_instructor
+    - template_pattern が instructor（明細見出しの列・集計ラベルの列と重複なしを、パーサーが確認済み。
+      確認できない帳票は instructor_unidentified になり、net_amount は割り当てられない）
+    - net_amount が整数で、net_amount に読み取り時の警告（数式キャッシュなし・型違い等）が無い
+    """
+    if record.get("source_name") != template_instructor.SOURCE_NAME:
+        return None
+    if reference.get("template_pattern") != template_instructor.PATTERN_NAME:
+        return None
+    net = record.get("net_amount")
+    if not _is_amount(net):
+        return None
+    if any(w.get("field") == "net_amount" for w in record.get("warnings", [])):
+        return None
+    return net
+
+
+def apply_accounting_amounts(result: ProcessResult, settings: dict | None) -> None:
+    """各売上に会計用の売上金額を付ける。決められない売上は警告を付け、要確認にする。"""
+    for item in result.sales:
+        amount, basis = decide_accounting_sales_amount(item["record"], item["reference"], settings)
+        item["accounting"] = {"accounting_sales_amount": amount, "accounting_sales_amount_basis": basis}
+        if amount is None:
+            record = item["record"]
+            record["warnings"].append(make_issue("ACCOUNTING_SALES_AMOUNT_UNKNOWN", "accounting_sales_amount"))
+            record["review_status"] = "needs_review"
 
 
 def transaction_rows(transactions: list[dict], columns: list[str]) -> list[dict]:

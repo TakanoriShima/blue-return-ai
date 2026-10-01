@@ -794,3 +794,54 @@ template_c とは構造が大きく異なるため、独立したアダプター
 
 - 売上・有効な取引の警告、資料単位の問題（`FILE_READ_FAILED` / `CSV_HEADER_MISMATCH`）、取引として読まなかった行（`ROW_NOT_TRANSACTION`）、売上計上日の未確定（`REVENUE_DATE_UNCONFIRMED`）を 1 つにまとめる。
 - 出力は実行ごとに作り直すため、判断を記入したファイルは別名で `data/decisions/` に保存する。判断ファイルを読み込んで反映する処理は次の段階で実装する。
+
+### 17.6 人間確認用の売上 Excel（`sales_summary_<年>_provisional.xlsx`）
+
+年間処理の実行フォルダに、売上データを人間が確認しやすい 1 冊の Excel として出力する。表題は「<年>年 売上・請求書集計（暫定）」。確定した売上帳・青色申告決算書としては扱わない。
+
+| シート | 内容 |
+| --- | --- |
+| 集計 | 取込件数、請求書フォルダの資料の状態別件数、`review_status` 別件数、売上計上日の確定・未確定件数、金額項目ごとの「判明分の合計」と「値が不明な件数」、帳票パターン等の内訳件数 |
+| 売上一覧 | 1 行 = 1 売上資料。`sales.csv` と同じ値を日本語の見出しで表示（売上No を付与） |
+| 売上明細 | 1 行 = 1 明細。売上No・`record_id` で売上一覧と対応。明細ごとの税率も表示 |
+| 要確認 | `unresolved_items.csv` のうち売上に関するもの。判断の記入欄は空欄 |
+
+- データモデルに無い値を追加しない。売上計上日が未確定なら空欄（請求日で補完しない）。
+- 金額の合計は判明している値だけの合計とし、不明（null）を 0 として扱わない。不明があれば「N 件中 M 件の合計」と明記する。判明分が無ければ合計も空欄。
+- 文字列はすべて文字列として書き込み、`=` で始まる値も数式にしない。
+- 既存ファイルは上書きしない。実データを含むため、外部に渡さない。
+
+### 17.7 会計用の売上金額（`accounting_sales_amount`）
+
+青色申告用の会計処理（売上帳・仕訳・集計）で使う税込経理の売上金額を、原資料の金額とは別の項目として持つ。`net_amount` / `tax_amount` / `gross_amount` 等の原資料の値は変更・削除しない。
+
+年度ごとの会計上の前提は、人間が設定ファイルに書く（プログラムは推測しない）。
+
+```json
+"accounting": {
+  "2026": {"tax_status": "exempt", "invoice_registration": false, "consumption_tax_accounting": "inclusive"}
+}
+```
+
+| 項目 | 値 |
+| --- | --- |
+| `tax_status` | `exempt`（免税事業者）/ `taxable`（課税事業者） |
+| `invoice_registration` | `true` / `false` |
+| `consumption_tax_accounting` | `inclusive`（税込経理）/ `exclusive`（税抜経理） |
+
+算出ルール（`exempt` かつ `inclusive` の年のみ。それ以外の組み合わせ・設定の無い年は未対応のため null）
+
+| 条件 | `accounting_sales_amount` | `accounting_sales_amount_basis` |
+| --- | --- | --- |
+| `gross_amount` が判明している | `gross_amount` | `gross_amount` |
+| `gross_amount` が不明で、template_c のパターン D（「ご請求金額」を税込の請求総額として確認済み） | `document_total`（ご請求金額） | `document_total` |
+| `gross_amount` が不明で、`template_instructor` の帳票（`template_pattern` が `instructor`。明細見出しと集計ラベルの列・重複なしをパーサーが確認済み）で、`net_amount` が整数かつ読み取り時の警告が無い | `net_amount`（帳票の「小計」＝源泉徴収前の税込報酬額。人間の確認による） | `instructor_subtotal` |
+| 上記以外（安全に決められない） | null | null |
+
+- null の売上には `ACCOUNTING_SALES_AMOUNT_UNKNOWN`（warning）を付け、`review_status` を `needs_review` にする（要確認一覧に出る）。
+- 0 は既知の 0 として保持する。null を 0 として扱わない。
+- パターン D の `net_amount` / `tax_amount` は逆算しない（null のまま）。`tax_amount = 0` と推測しない。
+- 他のテンプレートの「ご請求金額」・講師形式の「合計」など、税込の請求総額であると確認していない値は使わない。
+- 講師形式の最終の「合計」は、小計から源泉税額を差し引いた請求・振込予定額であるため、売上金額として使わない。
+- 講師形式で `net_amount` に入っている「小計」は、人間の確認では源泉徴収前の税込報酬額（消費税を内包）である。`net_amount` の項目名・意味の見直しは今回行っていない（§17.1.2 の割り当ては従来どおり）。
+- `sales.csv` に `accounting_sales_amount` と `accounting_sales_amount_basis` を追加する（既存列は変更しない）。人間確認用 Excel では、売上一覧に「会計用売上金額（税込経理）」「会計用売上金額の根拠」、集計に「会計用売上金額：判明分の合計」「値が不明（件）」と会計上の前提を表示する。`manifest.json` には、その年の会計設定を記録する。

@@ -25,6 +25,10 @@ sample_data/config/annual.example.json を参照。
 - パスはリポジトリ直下からの相対パスで書き、data/ 配下だけを指定できる。
 - processors に、資料の種類ごとの取込方法を汎用の識別子で指定する（金融機関名・サービス名は書かない）。
   指定の無い種類は取り込まず、資料一覧だけを作る。
+- accounting に、年度ごとの会計上の前提（人間が決める）を書く。例:
+      "accounting": {"2026": {"tax_status": "exempt", "invoice_registration": false,
+                              "consumption_tax_accounting": "inclusive"}}
+  tax_status: exempt（免税事業者）/ taxable（課税事業者）、consumption_tax_accounting: inclusive（税込経理）/ exclusive（税抜経理）。
 - CSV の書式は、必要なら "options" で上書きできる（encoding / header_row / columns）。
   例: "bank": {"format": "bank_csv_a", "options": {"header_row": 13}}
 """
@@ -33,7 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 CONFIG_VERSION = 1
@@ -50,6 +54,7 @@ class AnnualConfig:
     sources: dict[str, Path]
     decisions_dir: Path | None
     processors: dict[str, dict]
+    accounting: dict[int, dict] = field(default_factory=dict)  # 年度別の会計設定（{年: 設定}）
 
 
 def _resolve_data_path(value: object, key: str, repo_root: Path) -> Path:
@@ -97,7 +102,41 @@ def load_config(path: Path, repo_root: Path) -> AnnualConfig:
         sources=resolved,
         decisions_dir=decisions_dir,
         processors=_load_processors(data.get("processors")),
+        accounting=_load_accounting(data.get("accounting")),
     )
+
+
+# 年度別の会計設定で指定できる値
+TAX_STATUSES = ("exempt", "taxable")  # 免税事業者 / 課税事業者
+CONSUMPTION_TAX_ACCOUNTING = ("inclusive", "exclusive")  # 税込経理 / 税抜経理
+
+
+def _load_accounting(value: object) -> dict[int, dict]:
+    """accounting: {"<年>": {tax_status, invoice_registration, consumption_tax_accounting}} を読む。
+
+    税務上の前提は人間が年度ごとに指定する（プログラムは推測しない）。指定の無い年は空。
+    """
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("accounting はオブジェクトで指定してください")
+    settings: dict[int, dict] = {}
+    for year_text, setting in value.items():
+        if not (isinstance(year_text, str) and year_text.isdigit() and len(year_text) == 4):
+            raise ConfigError("accounting のキーは 4 桁の年（例: \"2026\"）で指定してください")
+        label = f"accounting.{year_text}"
+        expected = {"tax_status", "invoice_registration", "consumption_tax_accounting"}
+        if not isinstance(setting, dict) or set(setting) != expected:
+            raise ConfigError(f"{label} には {', '.join(sorted(expected))} をすべて指定してください")
+        if setting["tax_status"] not in TAX_STATUSES:
+            raise ConfigError(f"{label}.tax_status は {' / '.join(TAX_STATUSES)} のいずれかです")
+        if not isinstance(setting["invoice_registration"], bool):
+            raise ConfigError(f"{label}.invoice_registration は true / false で指定してください")
+        if setting["consumption_tax_accounting"] not in CONSUMPTION_TAX_ACCOUNTING:
+            raise ConfigError(
+                f"{label}.consumption_tax_accounting は {' / '.join(CONSUMPTION_TAX_ACCOUNTING)} のいずれかです")
+        settings[int(year_text)] = dict(setting)
+    return settings
 
 
 PROCESSOR_KEYS = {"invoices": "template", "credit_card": "format", "bank": "format"}

@@ -6,7 +6,8 @@
   既存の出力先は上書きしない。
 - 設定ファイルの processors に従い、売上 Excel（テンプレート）・カード CSV・銀行 CSV を取り込み、
   sales.csv / sales_line_items.csv / card_transactions.csv / bank_transactions.csv /
-  unresolved_items.csv / documents_inventory.csv / manifest.json を出力する。
+  unresolved_items.csv / documents_inventory.csv / manifest.json と、人間確認用の
+  sales_summary_<年>_provisional.xlsx（売上・請求書集計（暫定））を出力する。
   照合・仕訳・集計は次の段階で追加する。
 - 画面には件数だけを表示し、実ファイル名・実データの値は表示しない。
   資料一覧の CSV には元ファイルの相対パスを記録するが、出力先は data/ 配下に限る。
@@ -36,6 +37,7 @@ from .annual_processors import (
     CARD_COLUMNS,
     SALES_COLUMNS,
     UNRESOLVED_COLUMNS,
+    apply_accounting_amounts,
     process_documents,
     resolve_processors,
     sales_rows,
@@ -43,6 +45,7 @@ from .annual_processors import (
     transaction_rows,
     unresolved_rows,
 )
+from . import sales_workbook
 from .output import write_csv, write_line_items_csv
 
 MIN_YEAR = 2000
@@ -70,6 +73,11 @@ OUTPUT_FILES = [
     "sales.csv", "sales_line_items.csv", "card_transactions.csv", "bank_transactions.csv",
     "unresolved_items.csv", "documents_inventory.csv", "manifest.json",
 ]
+
+
+def output_files(year: int) -> list[str]:
+    """実行フォルダに作るファイル（人間確認用の売上 Excel を含む）。"""
+    return [*OUTPUT_FILES, sales_workbook.workbook_file_name(year)]
 
 
 class AnnualError(Exception):
@@ -184,6 +192,8 @@ def run(year: int, config_path: Path, out_root: Path, repo_root: Path = REPO_ROO
 
     inventory = build_inventory(config, repo_root, decisions)
     processed = process_documents(inventory, processors, repo_root, year)
+    accounting = config.accounting.get(year)
+    apply_accounting_amounts(processed, accounting)
     unresolved = unresolved_rows(processed)
     counts = summarize(processed, unresolved)
 
@@ -195,6 +205,19 @@ def run(year: int, config_path: Path, out_root: Path, repo_root: Path = REPO_ROO
               transaction_rows(processed.bank, BANK_COLUMNS))
     write_csv(run_dir / "unresolved_items.csv", UNRESOLVED_COLUMNS, unresolved)
     write_csv(run_dir / "documents_inventory.csv", INVENTORY_COLUMNS, inventory)
+    workbook_name = sales_workbook.workbook_file_name(year)
+    created_at = datetime.now().isoformat(timespec="seconds")
+    sales_workbook.write_workbook(run_dir / workbook_name, sales_workbook.build_workbook(
+        sales=sales_rows(processed),
+        line_items=[
+            {**line, "record_id": item["record"]["record_id"], "line_no": number}
+            for item in processed.sales
+            for number, line in enumerate(item["record"]["line_items"] or [], start=1)
+        ],
+        issues=[i for i in unresolved if i["source_type"] == "sales"],
+        invoice_documents=Counter(r["status"] for r in inventory if r["category"] == "invoices"),
+        year=year, run_id=run_id, created_at=created_at, accounting=accounting,
+    ))
 
     by_status = Counter(row["status"] for row in inventory)
     by_category = {
@@ -205,7 +228,7 @@ def run(year: int, config_path: Path, out_root: Path, repo_root: Path = REPO_ROO
         "schema": MANIFEST_SCHEMA,
         "run_id": run_id,
         "year": year,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "created_at": created_at,
         "config_sha256": config.sha256,
         "sources": {
             category: {
@@ -225,8 +248,9 @@ def run(year: int, config_path: Path, out_root: Path, repo_root: Path = REPO_ROO
             "by_status": {status: by_status.get(status, 0) for status in DOCUMENT_STATUSES},
             "by_category": by_category,
         },
+        "accounting": accounting,  # 年度の会計設定（未設定なら null）
         "processing": counts,
-        "outputs": OUTPUT_FILES,
+        "outputs": output_files(year),
         "notes": [
             "暫定実行です。売上と入金の照合、カードと引落の照合、仕訳、集計はまだ実装されていません。",
             "売上計上日（revenue_date）は未確定です。取引の分類（事業・私用等）はすべて未判断です。",
@@ -293,7 +317,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(format_summary(result["manifest"]))
     print(f"出力先: data/output/annual 配下の {result['run_dir'].name}")
-    print("出力 CSV には実データが含まれます。外部 AI に渡さないでください（共有は上の件数のみ）。")
+    print(f"人間確認用: {sales_workbook.workbook_file_name(result['manifest']['year'])}（売上・請求書集計（暫定））")
+    print("出力 CSV・Excel には実データが含まれます。外部 AI に渡さないでください（共有は上の件数のみ）。")
     return 0
 
 

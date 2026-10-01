@@ -159,6 +159,7 @@ data/bank/         銀行入出金明細 CSV      ── 書式定義で読み�
 - 取込方法は設定ファイル（`data/config/annual.json`）で、汎用の識別子で指定します（記入例：`sample_data/config/annual.example.json`）。
   - Excel 請求書：`template_a` / `template_b` / `template_c` / `template_instructor`。複数指定した場合は、ブックの **シート名** で振り分けます（ファイル名・取引先名・金額では判定しません）。
   - カード CSV：`card_csv_a`、銀行 CSV：`bank_csv_a`（文字コード・ヘッダー行・列名は設定で上書き可能）。
+  - 年度ごとの会計上の前提（免税 / 課税、インボイス登録、税込 / 税抜経理）を `accounting` に書きます。免税・税込経理の年は、原資料の金額とは別に会計用の売上金額（`accounting_sales_amount`）を出力します（安全に決められない場合は空欄で要確認）。
 - Excel 請求書の各テンプレートは、ラベルの構成で書式を確認し、合わない場合は推測せず要確認（`TEMPLATE_LABEL_MISMATCH`）にします。
   - `template_c` は、同じシート名で集計欄の構成が異なる 5 つのパターン（A〜E）を、ラベルの集合で判定します。
   - Excel の日付シリアル値は、openpyxl の変換機能で日付にします。
@@ -176,6 +177,7 @@ data/bank/         銀行入出金明細 CSV      ── 書式定義で読み�
 | `unresolved_items.csv` | 全工程の要確認（警告コード・対象項目・判断を記入する列） |
 | `documents_inventory.csv` | 全資料の一覧と取込状況（imported / manual / cross_check_only / unsupported / unresolved） |
 | `manifest.json` | 件数・設定の SHA-256 など（ファイル名・値は含まない） |
+| `sales_summary_<年>_provisional.xlsx` | 人間確認用の「<年>年 売上・請求書集計（暫定）」。集計・売上一覧・売上明細・要確認の 4 シート。金額の合計は判明分だけの合計で、不明な件数を併記（確定した売上帳・青色申告決算書ではない） |
 
 - 取引は `source_key`（内容から作る安定キー）で識別し、期間の重なる CSV に同じ取引があっても二重登録しません。同じファイル内のまったく同じ取引は消さず、内容の近い取引は「重複候補」として要確認に出します。
 - 資料単位の扱い（手入力で対応した・照合用のみ等）は、`data/decisions/documents.csv`（`sha256,status,note`）に人間が記入すると、次回の実行から反映されます。

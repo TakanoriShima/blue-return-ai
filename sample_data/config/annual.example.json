@@ -11,5 +11,12 @@
     "invoices": {"templates": ["template_c", "template_instructor"]},
     "credit_card": {"format": "card_csv_a"},
     "bank": {"format": "bank_csv_a"}
+  },
+  "accounting": {
+    "2026": {
+      "tax_status": "exempt",
+      "invoice_registration": false,
+      "consumption_tax_accounting": "inclusive"
+    }
   }
 }

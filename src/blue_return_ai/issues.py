@@ -45,6 +45,7 @@ SEVERITY: dict[str, str] = {
     "BANK_BOTH_AMOUNTS": ERROR,
     # 年間処理：売上
     "REVENUE_DATE_UNCONFIRMED": WARNING,
+    "ACCOUNTING_SALES_AMOUNT_UNKNOWN": WARNING,
 }
 
 # 要確認一覧（unresolved_items.csv）に出す説明。実データの値は含めない
@@ -78,6 +79,7 @@ MESSAGES: dict[str, str] = {
     "BANK_AMOUNT_MISSING": "出金額・入金額のどちらも取得できません",
     "BANK_BOTH_AMOUNTS": "出金額と入金額の両方に値があります",
     "REVENUE_DATE_UNCONFIRMED": "売上計上日が未確定です（請求日を自動で計上日にしていません）",
+    "ACCOUNTING_SALES_AMOUNT_UNKNOWN": "会計用の売上金額（税込経理）を資料から安全に決められません（推測していません）",
 }
 
 
