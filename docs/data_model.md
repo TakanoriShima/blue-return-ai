@@ -1,6 +1,6 @@
 # 共通売上データモデル 設計書
 
-- 状態: **設計段階（未実装）**
+- 状態: **MVP-1 で実装済み**（Excel 請求書・`template_a` の範囲）。MVP-2 以降の範囲は設計・実装継続中
 - 対象スキーマバージョン: `0.1`
 - 本書に記載するデータ例は、すべて **完全な架空データ** です。
 
@@ -235,10 +235,11 @@ expected_payment_amount = gross_amount - withholding_tax - sum(deductions[].amou
 
 | コード | 内容 | 重大度 |
 | --- | --- | --- |
-| `AMOUNT_NOT_INTEGER` | 金額が整数でない（Excel の表示上は整数でも内部値が小数の場合を含む） | error |
+| `AMOUNT_NOT_INTEGER` | 円単位の整数として解釈できない金額値。非整数の数値（Excel の表示上は整数でも内部値が小数の場合を含む）や、金額として解釈できない文字列等を含む。値は丸めず null とする | error |
 | `AMOUNT_NEGATIVE` | 金額が負 | error |
 | `NET_TAX_GROSS_MISMATCH` | `net_amount + tax_amount != gross_amount`（§5.2 の条件下） | error |
 | `LINE_ITEMS_SUM_MISMATCH` | 明細の合計が `net_amount`（外税）または `gross_amount`（内税）と一致しない | error |
+| `LINE_ITEM_AMOUNT_MISMATCH` | 明細の `quantity × unit_price` が `amount` と一致しない（§6） | warning |
 | `TAX_RATE_MISMATCH` | `tax_amount` が `net_amount × tax_rate` の切捨て・四捨五入・切上げのいずれとも一致しない | warning |
 | `WITHHOLDING_INCONSISTENT` | §5.3 の組み合わせ表に無い組み合わせ | error |
 | `EXPECTED_PAYMENT_MISMATCH` | 資料記載の振込予定額が §5.5 の計算式と一致しない | error |
@@ -273,7 +274,7 @@ expected_payment_amount = gross_amount - withholding_tax - sum(deductions[].amou
 | `tax_treatment` | enum | 可 | – | 明細ごとの税の扱い。null の場合はレコードの値に従う |
 
 - `line_items` が `null` の場合は「明細が取得できない」、`[]` の場合は「明細が無いと確定」を表す。
-- `quantity × unit_price == amount` は、3 項目とも判明している場合に検証する（不一致は warning。端数のある単価等があり得るため）。
+- `quantity × unit_price == amount` は、3 項目とも判明している場合に検証する（不一致は `LINE_ITEM_AMOUNT_MISMATCH`、warning。端数のある単価等があり得るため）。
 - 立替経費（交通費等）が明細に含まれる場合の扱い（売上に含めるか等）は税務判断を伴うため、MVP-1 では区別せず、将来の検討事項とする。
 
 ## 7. 日付の検証ルール（共通）
@@ -328,6 +329,17 @@ expected_payment_amount = gross_amount - withholding_tax - sum(deductions[].amou
 
 - **警告に実データの値（金額・取引先名・日付等）を含めない。** 人間は確認用 CSV で値を見ながら、コードと項目名で内容を判断する。
 - 項目が取得できなかった場合は `FIELD_MISSING` を記録する（欠落一覧の別項目は設けない）。
+- `FIELD_MISSING`（warning）は、MVP-1 では次の場合に記録する。
+  - 次の項目が null の場合：`document_date`、`service_period`、`customer`、`description`、`line_items`、`payment_due`、`net_amount`、`gross_amount`、`deductions`、`expected_payment_amount`。
+  - `tax_amount` が null の場合（`tax_treatment` が `inclusive` のときを除く。§5.2）。
+  - `tax_rate` が null の場合（`tax_treatment` が `exclusive` のときのみ）。
+  - 明細の各項目（`description` / `quantity` / `unit` / `unit_price` / `amount`）が null の場合（`field` は `line_items[0].quantity` のように表す）。
+  - `tax_treatment == "unknown"` の場合（`field` = `tax_treatment`）。
+  - `withholding_status == "unknown"` の場合（`field` = `withholding_status`）。
+  - `withholding_status == "applied"` かつ `withholding_tax` が null の場合（`field` = `withholding_tax`）。
+  - ただし、同じ項目に既に別の警告（例：`FORMULA_NO_CACHED_VALUE`、`DATE_INVALID`）がある場合は重複して記録しない。
+  - `external_id`・`revenue_date` は MVP-1 では常に null だが、`FIELD_MISSING` の対象としない。
+- `unknown` を `FIELD_MISSING` として扱うのは、`unknown` を 0 や `none` とみなさず、人間による確認が必要な状態として `needs_review` に回すためである（§2 の null / 0 の区別、§5.3 の組み合わせ表は変わらない）。
 
 ### 8.3 値の由来（`source` / `calculated` / `human`）
 
@@ -354,7 +366,9 @@ expected_payment_amount = gross_amount - withholding_tax - sum(deductions[].amou
 MVP-1 では、データ構造を複雑にせず、**ファイルを分けることで区別する**。
 
 1. プログラムは抽出結果（`sales_record` の JSON）と確認用 CSV を出力する。
-2. 抽出結果の JSON は **上書きしない**（再実行時は新しいファイルとして出力する）。
+2. 抽出結果の JSON は **上書きしない**。
+   - 同じ `source_hash` の資料が既存の出力に存在する場合は、新しい JSON を作成せず「既存取込候補」としてスキップする（§9.4）。
+   - それ以外の資料は、`record_id` ごとに新しい JSON ファイルとして出力する。既存の JSON ファイルを上書きすることはない。
 3. 人間は確認用 CSV をコピーし、確認・修正済みのファイルとして別名で保存する。
 4. 確認済みファイルをシステムへ取り込む処理は、MVP-1 の範囲外（将来、`field_origins` と合わせて設計する）。
 
@@ -362,10 +376,12 @@ MVP-1 では、データ構造を複雑にせず、**ファイルを分けるこ
 
 - 出力先は `data/` 配下（Git 管理対象外）とする。実データを含むため。
 - 1 行 = 1 `sales_record` のファイルと、1 行 = 1 明細のファイルの 2 つに分ける（`record_id` で対応付け）。
-- `warnings` はコードを連結して 1 列に表示する。
-- 人間が記入する列（例：`review_status`、`revenue_date`、`reviewer_note`）を空欄で用意する。
+- `warnings` は各警告を `code:field` の形式（例：`FIELD_MISSING:payment_due`）で表し、複数ある場合は `;` で連結して 1 列に表示する。
+- 人間が記入する列として `human_review_status`、`human_revenue_date`、`human_reviewer_note` を空欄で用意する。
+  - プログラムが生成した値（`review_status` 等の列）と、人間が入力する確認値（`human_` で始まる列）は別の列とし、人間がプログラムの生成値を CSV 上で直接上書きする形にはしない。
+  - `human_revenue_date` は人間が確定する売上計上日の入力欄であり、プログラムは値を入れない（`revenue_date` は §4.3 のとおりプログラムが設定しない）。
 - 文字コードは Excel で開きやすい UTF-8（BOM 付き）を想定する（要確認）。
-- **CSV インジェクション対策:** `=`、`+`、`-`、`@` で始まる文字列は Excel で数式として解釈されるおそれがあるため、文字列項目は出力時にエスケープする。
+- **CSV インジェクション対策:** `=`、`+`、`-`、`@`、タブ、CR（復帰）で始まる文字列は Excel で数式として解釈されるおそれがあるため、出力時に先頭へ `'` を付けてエスケープする。数値型の値はエスケープしない。JSON 側の値はエスケープせず、資料の値のまま保持する。
 
 ## 9. 元資料の識別
 
@@ -394,8 +410,12 @@ MVP-1 では、データ構造を複雑にせず、**ファイルを分けるこ
 
 - 元資料ファイル内容の SHA-256 とする。
 - 同じ元ファイルを再処理した場合、`source_hash` が既存の取込済みレコードと一致することで **既存取込候補** として検出し、**自動的に別の売上として登録しない**（人間の確認に回す）。
+  - MVP-1 では、CLI が出力先の既存 JSON の `source_hash` と照合し、一致した資料は `sales_record` を作成せずにスキップする。画面には既存の `record_id` を表示する。同一実行内で同じ資料が複数指定された場合もスキップする。
+  - この検出は CLI の処理であり、`sales_record` の `warnings` に警告を追加するものではない。
 - 1 ファイル（1 ブック）に複数の請求書が含まれる場合、それらのレコードは同じ `source_hash` を持つ。
-- ファイルの内容が変わると `source_hash` も変わるため、修正版の請求書は `source_hash` では検出できない。このため、`document_date` + `customer` + `gross_amount` 等による **重複候補の検出** を併用する（`DUPLICATE_CANDIDATE` 警告）。
+- ファイルの内容が変わると `source_hash` も変わるため、修正版の請求書は `source_hash` では検出できない。
+  - 将来の検討事項として、`document_date` + `customer` + `gross_amount` 等による内容ベースの重複候補検出（警告コード案：`DUPLICATE_CANDIDATE`）を想定している。
+  - **MVP-1 では未実装** であり、`DUPLICATE_CANDIDATE` は実装済みの警告コードではない。
 
 ### 9.5 `external_id`
 
@@ -411,7 +431,7 @@ MVP-1 では、データ構造を複雑にせず、**ファイルを分けるこ
 
 ## 10. MVP-1: テンプレート別アダプター
 
-MVP-1 は「テンプレート別アダプター → 共通モデル」という構造を前提とする（コードは今回作成しない）。
+MVP-1 は「テンプレート別アダプター → 共通モデル」という構造で実装済みである（架空の書式 `template_a` のアダプター）。
 
 ```
 完全な架空 Excel 請求書（Python スクリプトで生成）
@@ -460,6 +480,14 @@ openpyxl は **数式を計算しない**。`data_only=True` で取得できる�
 | 結合セル | 値は結合範囲の左上セルにのみ入っている | テンプレート定義で左上セルを指定 |
 | 非表示シート・行 | 古い請求書や作業用の値が残っている場合がある | テンプレート定義で対象シートを明示 |
 | ファイル形式 | 旧形式 `.xls` は openpyxl で読めない | 対象外とし、`.xlsx` への変換は人間が行う |
+
+### 11.4 読み取り時の警告コード
+
+| コード | 内容 | 重大度 |
+| --- | --- | --- |
+| `FORMULA_NO_CACHED_VALUE` | 数式セルにキャッシュ値が無い（§11.1） | warning |
+| `TEMPLATE_LABEL_MISMATCH` | テンプレート定義で確認するラベルセルの内容が、定義と一致しない（別書式の誤適用の可能性） | error |
+| `QUANTITY_INVALID` | 明細の数量を十進数として解釈できない | warning |
 
 ## 12. 入金照合との関係（概要のみ）
 
