@@ -21,6 +21,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+.pytest_cache/
 
 # OS / Editor
 .DS_Store
