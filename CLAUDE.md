@@ -12,7 +12,7 @@
 
 最終的な申告そのものを AI に任せることは目的とせず、国税庁の確定申告書等作成コーナー・e-Tax 等につなげるための **経理支援** を目的とします。
 
-現在は開発初期段階で、実装はまだ開始していません。
+現在は開発初期段階です。**MVP-1（架空の Excel 請求書 → 共通売上データ → 検証 → JSON / 確認用 CSV）は完了** しており、次の開発段階は **MVP-2（異なる Excel 書式への対応）** です。PDF・LMS・銀行明細・経費・仕訳・帳簿・生成 AI による処理は未実装です。
 
 ## ディレクトリ構成
 
@@ -22,10 +22,13 @@ blue-return-ai/
 │   ├── bank/          #   銀行明細
 │   ├── credit-card/   #   クレジットカード明細
 │   ├── household/     #   家事関連費・家計関連データ
-│   └── invoices/      #   請求書
+│   ├── invoices/      #   請求書
+│   └── output/        #   CLI の出力（JSON / 確認用 CSV）。実データを含み得る
+├── docs/              # 設計文書（data_model.md が共通売上データモデルの正本）
 ├── sample_data/       # GitHub 公開用の架空データ
-├── src/               # Python ソースコード
-├── tests/             # テストコード
+├── src/blue_return_ai/ # Python ソースコード
+├── tests/             # テストコード（pytest）
+├── pyproject.toml     # パッケージ・依存・pytest 設定
 ├── CLAUDE.md          # Claude Code 向け開発ルール（本ファイル）
 ├── README.md          # プロジェクト説明
 ├── memo.txt           # 人間 → Claude Code の作業指示（Git 管理対象外）
@@ -71,25 +74,56 @@ Claude Code がファイルを読むと、その内容は外部の AI サービ�
 19. 実データの内容を `reply.txt`、ログ、エラー出力等へコピーしない。プログラムのログやエラーメッセージも、実データの値を出力しない設計とする。
 20. 実データの処理で問題が発生した場合も、**本人の明示的な承認なしに** Claude Code が `data/` を調査しない。
 
+## ローカル開発環境
+
+現在の標準的なローカル開発方法は、プロジェクトルートの `.venv` と editable install である。
+
+```bash
+python -m venv .venv
+source .venv/Scripts/activate   # Windows + Git Bash（macOS / Linux: source .venv/bin/activate）
+pip install -e .
+pip install pytest
+python -m pytest
+python -m blue_return_ai.cli sample_data/invoices/template_a_sample.xlsx --target-year 2026
+```
+
+- `pip install -e .` 後は `PYTHONPATH=src` の指定は不要。
+- pytest は `pyproject.toml` の設定（`pythonpath`・`testpaths`）で実行する。
+- 外部パッケージは openpyxl と pytest のみ。追加が必要な場合は勝手に導入せず提案する。
+- Claude Code が CLI を動作確認する場合は、架空データのみを使い、出力先は `data/` 以外（リポジトリ外の一時ディレクトリ等）とする。`data/output/` の中身は閲覧しない（ルール 15）。
+
 ## 設計方針（売上データ）
 
-詳細は今後の設計で詰める。現時点で守るべき方針は以下のとおり。
+共通売上データモデルの正本は `docs/data_model.md`（schema_version 0.1）とする。現時点で守るべき方針は以下のとおり。
 
 - **入力元の違いを吸収する**: 資料の種類（`document_type`: invoice / payment_statement / lms_statement）と取得元の形式（`source_type`: excel / pdf / lms_text）を区別し、最終的に共通の売上データ形式へ変換する。
   - 自分で作成する請求書は、PDF ではなく元の Excel を第一候補とする（openpyxl を想定）。
   - 取引先が発行する支払明細（PDF）は、まずローカルでのテキスト抽出を優先する。
   - LMS 上で実績を承認する案件は、画面からコピーしたテキストをローカルファイルとして保存し、変換する。OCR は現段階では不要。
 - **取得できない値は推測しない**: 元資料に無い、または確定できない項目は `null` とし、0 や既定値で埋めない。「無い（0）」と「不明（null）」を区別する（特に源泉徴収税額）。
-- **金額の概念を混同しない**: `gross_amount`（源泉徴収等を差し引く前の税込総額）と `expected_payment`（実際に振り込まれると期待される金額）は別の値として扱う。源泉徴収等により両者は一致しないことがある。
+- **金額の概念を混同しない**: `gross_amount`（源泉徴収等を差し引く前の税込総額）と `expected_payment_amount`（実際に振り込まれると期待される金額）は別の値として扱う。源泉徴収等により両者は一致しないことがある。
 - **日付の概念を混同しない**: 請求日・発行日（`document_date`）、業務対象期間（`service_period`）、売上計上日（`revenue_date`）、入金日（`payment_date`）は別概念として扱う。
 - **売上計上日はプログラムが決定しない**: 税務上の売上計上日を、請求日や入金日からプログラムが自動で確定してはならない。候補の提示にとどめ、人間が確定する。
-- **入金照合を前提とする**: 売上資料 → `expected_payment` → 銀行明細の入金 → 照合候補 → 人間による確認 → 入金確定、という流れへ拡張できる構造にする。
+- **入金照合を前提とする**: 売上資料 → `expected_payment_amount` → 銀行明細の入金 → 照合候補 → 人間による確認 → 入金確定、という流れへ拡張できる構造にする。
 - **金額は整数（円）で扱う**: float は使わない。
 
-### MVP の開発順序（予定）
+### 実装済みの重要な設計ルール（MVP-1 時点）
 
-1. MVP-1: 架空の Excel 請求書 → openpyxl → 共通売上データ → 検証 → pytest
-2. MVP-2: 異なる Excel 書式への対応
+- **`record_id`**: `sales_record` 自体を識別する UUID。`source_hash` や資料の内容から生成しない。
+- **`source_hash`**: 元ファイル内容の SHA-256。出力先の既存データと一致した場合は **重複取込候補としてスキップ** し、自動的に別の売上として登録しない。
+- **`review_status`**:
+  - `unreviewed`: 機械検証では問題を検出していないが、人間はまだ確認していない（問題なしと確定した状態ではない）。
+  - `needs_review`: 警告・エラー・重要な欠落等があり、人間による確認が必要。
+  - `reviewed`: 人間が確認した場合のみ設定する。**プログラムは `reviewed` を設定しない。**
+- **`revenue_date`**: プログラムは設定しない（常に null）。人間が確定する。
+- **警告・画面表示**: 警告はコード・項目名・重大度のみとし、実データの値や元ファイル名を含めない。
+- **Excel の保護**: 元の Excel は読み取るだけで、保存・上書きしない。数式セルのキャッシュ値が無い場合は推測せず null とし警告する。
+- **出力先**: 既定は `data/output/`。リポジトリ内では `data/` 配下以外への出力を拒否する。
+
+### MVP の開発順序
+
+1. MVP-1: 架空の Excel 請求書 → openpyxl → 共通売上データ → 検証 → JSON / 確認用 CSV → pytest（**完了**）
+2. MVP-2: 異なる Excel 書式への対応（**次の開発段階**）
 3. MVP-3: テキスト PDF の支払明細への対応
 4. MVP-4: LMS からコピーしたテキストへの対応
 5. MVP-5: 銀行明細 CSV の取込
