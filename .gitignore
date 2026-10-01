@@ -1,0 +1,27 @@
+# 実会計データ・個人情報
+data/
+
+# 秘密情報・認証情報
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+
+# 作業指示・作業報告（人間 ⇔ Claude Code）
+/memo.txt
+/reply.txt
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
